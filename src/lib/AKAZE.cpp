@@ -91,7 +91,8 @@ void AKAZE::Allocate_Memory_Evolution() {
     vector<float> tau;
     float ttime = 0.0;
     ttime = evolution_[i].etime-evolution_[i-1].etime;
-    naux = fed_tau_by_process_time(ttime, 1, 0.25, reordering_,tau);
+    float tmax = 0.25*(1<<2*evolution_[i].octave);
+    naux = fed_tau_by_process_time(ttime, 1, tmax, reordering_,tau);
     nsteps_.push_back(naux);
     tsteps_.push_back(tau);
     ncycles_++;
@@ -159,8 +160,10 @@ int AKAZE::Create_Nonlinear_Scale_Space(const cv::Mat& img) {
     }
 
     // Perform FED n inner steps
-    for (int j = 0; j < nsteps_[i-1]; j++)
-      nld_step_scalar(evolution_[i].Lt, evolution_[i].Lflow, evolution_[i].Lstep, tsteps_[i-1][j]);
+    for (int j = 0; j < nsteps_[i-1]; j++) {
+      float stepsize = tsteps_[i-1][j]/(1<<2*evolution_[i].octave);
+      nld_step_scalar(evolution_[i].Lt, evolution_[i].Lflow, evolution_[i].Lstep, stepsize);
+    }
   }
 
   t2 = cv::getTickCount();
