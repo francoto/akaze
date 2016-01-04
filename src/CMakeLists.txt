@@ -2,6 +2,7 @@
 # Find external libraries and dependencies
 find_package(OpenCV REQUIRED)
 find_package(Doxygen)
+find_package(CUDA)
 
 if (NOT APPLE)
   find_package(OpenMP)
@@ -12,6 +13,7 @@ endif ()
 IF(UNIX)
   SET(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS} -g -O0  -Wall -Wextra -Wunused-variable -DDEBUG -D_DEBUG")
   SET(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS} -O0 -g  -Wall -Wextra -Wunused-variable -DDEBUG -D_DEBUG")
+  LIST(APPEND CUDA_NVCC_FLAGS "-arch=sm_35;-lineinfo;--compiler-options;-O2;-DVERBOSE")
 ENDIF(UNIX)
 
 if(OPENMP_FOUND)
@@ -30,9 +32,11 @@ if(OPENMP_FOUND)
     endif(UNIX)
 endif(OPENMP_FOUND)
 
+SET(CUDASIFT /home/celle/CudaSift)
+
 # ============================================================================ #
 # Create projects
-include_directories("lib/")
+include_directories("lib/" ${CUDASIFT})
 
 # AKAZE libraries
 set(AKAZE_SRCS
@@ -41,21 +45,29 @@ set(AKAZE_SRCS
     lib/fed.h                    lib/fed.cpp
     lib/nldiffusion_functions.h  lib/nldiffusion_functions.cpp
     lib/utils.h                  lib/utils.cpp)
-
+ 
 add_library(AKAZE ${AKAZE_SRCS})
 target_link_libraries(AKAZE ${OpenCV_LIBS})
 
+SET(AKAZE_CUDA_SRCS
+  ${CUDASIFT}/cudaImage.cu lib/cuda_akaze.cu)
+
+SET(CUDA_SEPARABLE_COMPILATION ON)
+
+cuda_add_library(AKAZE_CUDA ${AKAZE_CUDA_SRCS})
+target_link_libraries(AKAZE_CUDA ${OpenCV_LIBS})
+
 # Feature detector program
 add_executable(akaze_features akaze_features.cpp)
-target_link_libraries(akaze_features AKAZE)
+target_link_libraries(akaze_features AKAZE AKAZE_CUDA)
 
 # Image matching program
 add_executable(akaze_match akaze_match.cpp)
-target_link_libraries(akaze_match AKAZE)
+target_link_libraries(akaze_match AKAZE AKAZE_CUDA)
 
 # Program that compares AKAZE with ORB and BRISK
 add_executable(akaze_compare akaze_compare.cpp)
-target_link_libraries(akaze_compare AKAZE)
+target_link_libraries(akaze_compare AKAZE AKAZE_CUDA)
 
 # ============================================================================ #
 # Library installation

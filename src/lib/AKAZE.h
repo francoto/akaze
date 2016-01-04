@@ -13,6 +13,8 @@
 #include "fed.h"
 #include "utils.h"
 #include "nldiffusion_functions.h"
+#include "cudaImage.h"
+#include "cuda_akaze.h"
 
 // OpenCV
 #include <opencv2/features2d/features2d.hpp>
@@ -40,6 +42,9 @@ namespace libAKAZE {
 
     /// Computation times variables in ms
     AKAZETiming timing_;
+
+    /// CUDA memory buffers
+    std::vector<float*> cuda_buffers;
 
   public:
 

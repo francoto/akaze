@@ -105,6 +105,8 @@ struct AKAZEOptions {
     save_scale_space = false;
     save_keypoints = false;
     verbosity = false;
+
+    ncudaimages = 4;
   }
 
   int omin;                       ///< Initial octave level (-1 means that the size of the input image is duplicated)
@@ -132,6 +134,8 @@ struct AKAZEOptions {
   bool save_scale_space;          ///< Set to true for saving the scale space images
   bool save_keypoints;            ///< Set to true for saving the detected keypoints and descriptors
   bool verbosity;                 ///< Set to true for displaying verbosity information
+
+  int ncudaimages;                ///< Number of CUDA images allocated per octave
 
   friend std::ostream& operator<<(std::ostream& os,
                                   const AKAZEOptions& akaze_options) {

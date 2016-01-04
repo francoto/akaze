@@ -22,6 +22,7 @@
 
 #include "AKAZE.h"
 #include <opencv2/highgui/highgui.hpp>
+#include <cstdio> //%%%%
 
 using namespace std;
 using namespace libAKAZE;
@@ -43,6 +44,7 @@ AKAZE::AKAZE(const AKAZEOptions& options) : options_(options) {
 /* ************************************************************************* */
 AKAZE::~AKAZE() {
   evolution_.clear();
+  FreeBuffers(cuda_buffers[0]);
 }
 
 /* ************************************************************************* */
@@ -75,6 +77,7 @@ void AKAZE::Allocate_Memory_Evolution() {
       step.Ldet.create(size, CV_32F);
       step.Lflow.create(size, CV_32F);
       step.Lstep.create(size, CV_32F);
+      step.Lsmooth.create(size, CV_32F); //%%%%
 
       step.esigma = options_.soffset*pow(2.0f, (float)(j)/(float)(options_.nsublevels) + i);
       step.sigma_size = fRound(step.esigma);
@@ -97,6 +100,11 @@ void AKAZE::Allocate_Memory_Evolution() {
     tsteps_.push_back(tau);
     ncycles_++;
   }
+
+  // Allocate memory for CUDA buffers
+  options_.ncudaimages = 4*options_.nsublevels;
+  AllocBuffers(evolution_[0].Lt.cols, evolution_[0].Lt.rows, options_.ncudaimages, options_.omax, cuda_buffers);
+
 }
 
 /* ************************************************************************* */
@@ -112,6 +120,72 @@ int AKAZE::Create_Nonlinear_Scale_Space(const cv::Mat& img) {
 
   t1 = cv::getTickCount();
 
+#if 1
+  
+  TEvolution &ev = evolution_[0];
+  int w = ev.Lt.cols;
+  int h = ev.Lt.rows;
+  int p = iAlignUp(w, 128);
+  CudaImage Limg, Lt, Ltemp, Lsmooth;
+  Limg.Allocate(w, h, p, true, cuda_buffers[0], (float*)img.data);
+  Lt.Allocate(w, h, p, true, cuda_buffers[0], (float*)ev.Lt.data);
+  Lsmooth.Allocate(w, h, p, true, cuda_buffers[1], (float*)ev.Lsmooth.data);
+  Ltemp.Allocate(w, h, p, false, cuda_buffers[2]);
+
+  Limg.Download();
+
+  ContrastPercentile(Limg, Ltemp, Lsmooth, options_.kcontrast_percentile, options_.kcontrast_nbins, options_.kcontrast);
+  LowPass(Limg, Lt, Ltemp, options_.soffset*options_.soffset, 2*ceil((options_.soffset - 0.8)/0.3) + 3);
+  Copy(Lt, Lsmooth);
+
+  Lt.Readback();
+  Lsmooth.Readback(); //%%%%
+
+  t2 = cv::getTickCount();
+  timing_.kcontrast = 1000.0*(t2-t1) / cv::getTickFrequency();
+
+  // Now generate the rest of evolution levels
+  for (size_t i = 1; i < evolution_.size(); i++) {
+
+    TEvolution &evn = evolution_[i];
+    int wn = evn.Lt.cols;
+    int hn = evn.Lt.rows;
+    int pn = iAlignUp(wn, 128);
+    int num = options_.ncudaimages;
+    CudaImage Lstep, Lflow, Lt, Lsmooth;
+    Lt.Allocate(wn, hn, pn, true, cuda_buffers[evn.octave*num + 0 + 4*evn.sublevel], (float*)evn.Lt.data);
+    Lsmooth.Allocate(wn, hn, pn, true, cuda_buffers[evn.octave*num + 1 + 4*evn.sublevel], (float*)evn.Lsmooth.data);
+    Lstep.Allocate(wn, hn, pn, false, cuda_buffers[evn.octave*num + 2]);
+    Lflow.Allocate(wn, hn, pn, false, cuda_buffers[evn.octave*num + 3]);
+
+    TEvolution &evo = evolution_[i-1];
+    int wo = evo.Lt.cols;
+    int ho = evo.Lt.rows;
+    int po = iAlignUp(wo, 128);
+    CudaImage Ltold;
+    Ltold.Allocate(wo, ho, po, true, cuda_buffers[evo.octave*num + 0 + 4*evo.sublevel], (float*)evo.Lt.data);
+
+    if (evn.octave > evo.octave) {
+      HalfSample(Ltold, Lt);
+      options_.kcontrast = options_.kcontrast*0.75;
+    } else
+      Copy(Ltold, Lt);
+
+    LowPass(Lt, Lsmooth, Lstep, 1.0, 5);
+    Flow(Lsmooth, Lflow, options_.diffusivity, options_.kcontrast);
+
+    for (int j = 0; j < nsteps_[i-1]; j++) {
+      float stepsize = tsteps_[i-1][j]/(1<<2*evn.octave);
+      NLDStep(Lt, Lflow, Lstep, stepsize);
+    }
+
+    Lt.Readback();
+    Lsmooth.Readback(); //%%%%
+
+  }
+
+#else
+
   // Copy the original image to the first level of the evolution
   img.copyTo(evolution_[0].Lt);
   gaussian_2D_convolution(evolution_[0].Lt, evolution_[0].Lt, 0, 0, options_.soffset);
@@ -120,7 +194,7 @@ int AKAZE::Create_Nonlinear_Scale_Space(const cv::Mat& img) {
   // First compute the kcontrast factor
   options_.kcontrast = compute_k_percentile(img, options_.kcontrast_percentile,
                                             1.0, options_.kcontrast_nbins, 0, 0);
-
+  
   t2 = cv::getTickCount();
   timing_.kcontrast = 1000.0*(t2-t1) / cv::getTickFrequency();
 
@@ -164,7 +238,10 @@ int AKAZE::Create_Nonlinear_Scale_Space(const cv::Mat& img) {
       float stepsize = tsteps_[i-1][j]/(1<<2*evolution_[i].octave);
       nld_step_scalar(evolution_[i].Lt, evolution_[i].Lflow, evolution_[i].Lstep, stepsize);
     }
+
   }
+
+#endif
 
   t2 = cv::getTickCount();
   timing_.scale = 1000.0*(t2-t1) / cv::getTickFrequency();
@@ -180,7 +257,53 @@ void AKAZE::Feature_Detection(std::vector<cv::KeyPoint>& kpts) {
   t1 = cv::getTickCount();
 
   vector<cv::KeyPoint>().swap(kpts);
+#if 0
+
   Compute_Determinant_Hessian_Response();
+
+#else
+
+  int num = options_.ncudaimages;
+  for (size_t i = 0; i < evolution_.size(); i++) {
+    TEvolution &ev = evolution_[i];
+    CudaImage Lx, Ly, Lsmooth, Ldet;
+    Lx.Allocate(ev.Lt.cols, ev.Lt.rows, iAlignUp(ev.Lt.cols, 128), true, cuda_buffers[ev.octave*num + 2 + 4*ev.sublevel], (float*)evolution_[i].Lx.data);
+    Ly.Allocate(ev.Lt.cols, ev.Lt.rows, iAlignUp(ev.Lt.cols, 128), true, cuda_buffers[ev.octave*num + 3 + 4*ev.sublevel], (float*)evolution_[i].Ly.data);
+    Lsmooth.Allocate(ev.Lt.cols, ev.Lt.rows, iAlignUp(ev.Lt.cols, 128), true, cuda_buffers[ev.octave*num + 1 + 4*ev.sublevel], (float*)ev.Lsmooth.data);
+
+    float ratio = pow(2.0f,(float)evolution_[i].octave);
+    int sigma_size_ = fRound(evolution_[i].esigma*options_.derivative_factor/ratio);
+    HessianDeterminant(Lsmooth, Lx, Ly, sigma_size_);
+   
+    Ldet.Allocate(ev.Lt.cols, ev.Lt.rows, iAlignUp(ev.Lt.cols, 128), true, cuda_buffers[ev.octave*num + 1 + 4*ev.sublevel], (float*)ev.Ldet.data);
+    Ldet.Readback();
+    Lx.Readback();
+    Ly.Readback();
+  }
+  for (size_t i = 0; i < evolution_.size(); i++) {
+    TEvolution &ev = evolution_[i];
+    TEvolution &evp = evolution_[(i>0 && evolution_[i].octave==evolution_[i-1].octave ? i-1 : i)];
+    TEvolution &evn = evolution_[(i<evolution_.size()-1 && evolution_[i].octave==evolution_[i+1].octave ? i+1 : i)];
+    CudaImage Ldet, LdetP, LdetN;
+    Ldet.Allocate(ev.Lt.cols, ev.Lt.rows, iAlignUp(ev.Lt.cols, 128), true, cuda_buffers[ev.octave*num + 1 + 4*ev.sublevel], (float*)ev.Ldet.data);
+    LdetP.Allocate(evp.Lt.cols, evp.Lt.rows, iAlignUp(evp.Lt.cols, 128), true, cuda_buffers[evp.octave*num + 1 + 4*evp.sublevel], (float*)evp.Ldet.data);
+    LdetN.Allocate(evn.Lt.cols, evn.Lt.rows, iAlignUp(evn.Lt.cols, 128), true, cuda_buffers[evn.octave*num + 1 + 4*evn.sublevel], (float*)evn.Ldet.data);
+    float smax = 1.0f;
+    if (options_.descriptor == SURF_UPRIGHT || options_.descriptor == SURF ||
+	options_.descriptor == MLDB_UPRIGHT || options_.descriptor == MLDB) 
+      smax = 10.0*sqrtf(2.0f);
+    else if (options_.descriptor == MSURF_UPRIGHT || options_.descriptor == MSURF)
+      smax = 12.0*sqrtf(2.0f);
+    float ratio = pow(2.0f, (float)evolution_[i].octave);
+    float sigma_size_ = fRound(evolution_[i].esigma*options_.derivative_factor/ratio);
+    float border = smax*sigma_size_;
+    float thresh = std::max(options_.dthreshold, options_.min_dthreshold);
+    std::cout << i << "/" << evolution_.size() << std::endl;
+    FindExtrema(Ldet, LdetP, LdetN, border, thresh, i);
+  }
+
+#endif
+
   Find_Scale_Space_Extrema(kpts);
   Do_Subpixel_Refinement(kpts);
 
@@ -216,6 +339,7 @@ void AKAZE::Compute_Multiscale_Derivatives() {
     evolution_[i].Lxx = evolution_[i].Lxx*((sigma_size_)*(sigma_size_));
     evolution_[i].Lxy = evolution_[i].Lxy*((sigma_size_)*(sigma_size_));
     evolution_[i].Lyy = evolution_[i].Lyy*((sigma_size_)*(sigma_size_));
+
   }
 
   t2 = cv::getTickCount();
@@ -230,7 +354,7 @@ void AKAZE::Compute_Determinant_Hessian_Response() {
 
   for (size_t i = 0; i < evolution_.size(); i++) {
 
-    if (options_.verbosity == true)
+   if (options_.verbosity == true)
       cout << "Computing detector response. Determinant of Hessian. Evolution time: " << evolution_[i].etime << endl;
 
     for (int ix = 0; ix < evolution_[i].Ldet.rows; ix++) {
@@ -241,7 +365,9 @@ void AKAZE::Compute_Determinant_Hessian_Response() {
       for (int jx = 0; jx < evolution_[i].Ldet.cols; jx++)
         ldet[jx] = (lxx[jx]*lyy[jx]-lxy[jx]*lxy[jx]);
     }
+
   }
+
 }
 
 /* ************************************************************************* */
@@ -377,6 +503,9 @@ void AKAZE::Find_Scale_Space_Extrema(std::vector<cv::KeyPoint>& kpts) {
     if (is_repeated == false)
       kpts.push_back(point);
   }
+
+  //for (unsigned int i=0;i<kpts.size();i++)
+  //  printf("XXX %02d %03d %03d %f *\n", kpts[i].class_id, (int)kpts[i].pt.x, (int)kpts[i].pt.y, kpts[i].response); 
 
   t2 = cv::getTickCount();
   timing_.extrema = 1000.0*(t2-t1) / cv::getTickFrequency();
@@ -1399,6 +1528,7 @@ void AKAZE::Save_Detector_Responses() {
 /* ************************************************************************* */
 void AKAZE::Show_Computation_Times() const {
   cout << "(*) Time Scale Space: " << timing_.scale << endl;
+  cout << "   - Time KContrast: " << timing_.kcontrast << endl;
   cout << "(*) Time Detector: " << timing_.detector << endl;
   cout << "   - Time Derivatives: " << timing_.derivatives << endl;
   cout << "   - Time Extrema: " << timing_.extrema << endl;

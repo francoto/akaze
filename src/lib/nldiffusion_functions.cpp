@@ -21,6 +21,7 @@
 
 #include "nldiffusion_functions.h"
 #include <opencv2/imgproc/imgproc.hpp>
+#include <iostream>
 
 using namespace std;
 
@@ -150,13 +151,15 @@ float compute_k_percentile(const cv::Mat& img, float perc, float gscale,
 
     for (int x = 1; x < gaussian.cols-1; x++) {
 
-      modg = sqrt(Lx_row[x]*Lx_row[x] + Ly_row[x]*Ly_row[x]);
+      modg = Lx_row[x]*Lx_row[x] + Ly_row[x]*Ly_row[x];
 
       // Get the maximum
       if (modg > hmax)
         hmax = modg;
     }
   }
+
+  hmax = sqrt(hmax);
 
   // Skip the borders for computing the histogram
   for (int y = 1; y < gaussian.rows-1; y++) {
