@@ -44,7 +44,10 @@ namespace libAKAZE {
     AKAZETiming timing_;
 
     /// CUDA memory buffers
-    std::vector<float*> cuda_buffers;
+    float *cuda_memory;
+    cv::KeyPoint *cuda_points;
+    CudaImage *cuda_images;
+    std::vector<CudaImage> cuda_buffers;
 
   public:
 

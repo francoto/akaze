@@ -1,3 +1,4 @@
+#include <opencv2/features2d/features2d.hpp>
 #include "cuda_akaze.h"
 #include "cudautils.h"
 
@@ -12,7 +13,11 @@
 #define NLDSTEP_W      32
 #define NLDSTEP_H      13
 
+#define ORIENT_S  (13*16)
+#define EXTRACT_S      64
+
 __device__ __constant__ float d_Kernel[21];
+__device__ unsigned int d_PointCounter[1];
 
 template<int RADIUS>
 __global__ void ConvRowGPU(float *d_Result, float *d_Data, int width, int pitch, int height)
@@ -378,28 +383,39 @@ double Copy(CudaImage &inimg, CudaImage &outimg)
   return gpuTime;
 }
 
-void *AllocBuffers(int width, int height, int num, int omax, std::vector<float*> &buffers) 
+float *AllocBuffers(int width, int height, int num, int omax, int maxpts, std::vector<CudaImage> &buffers, cv::KeyPoint *&pts, CudaImage *&ims) 
 {
+  buffers.resize(omax*num);
   int w = width;
   int h = height;
   int p = iAlignUp(w, 128);
   int size = 0;        
-  std::vector<int> starts(omax*num);
   for (int i=0;i<omax;i++) {
     for (int j=0;j<num;j++) {
-      starts[i*num + j] = size;
+      CudaImage &buf = buffers[i*num + j];
+      buf.width = w;
+      buf.height = h;
+      buf.pitch = p;
+      buf.d_data = (float*)((long)size);
       size += h*p;
     }
     w /= 2;
     h /= 2;
     p = iAlignUp(w, 128);
   }
+  int ptsstart = size;
+  size += sizeof(cv::KeyPoint)*maxpts/sizeof(float);
+  int imgstart = size;
+  size += sizeof(CudaImage)*(num*omax + sizeof(float) - 1)/sizeof(float);
   float *memory = NULL;
   size_t pitch;
   safeCall(cudaMallocPitch((void **)&memory, &pitch, (size_t)4096, (size+4095)/4096*sizeof(float)));
-  buffers.resize(omax*num);
-  for (int i=0;i<omax*num;i++)
-    buffers[i] = memory + starts[i];
+  for (int i=0;i<omax*num;i++) {
+    CudaImage &buf = buffers[i];
+    buf.d_data = memory + (long)buf.d_data;
+  }
+  pts = (cv::KeyPoint *)(memory + ptsstart);
+  ims = (CudaImage *)(memory + imgstart);
   return memory;
 }
 
@@ -585,7 +601,7 @@ double HessianDeterminant(CudaImage &img, CudaImage &lx, CudaImage &ly, int step
   return gpuTime;
 }
 
- __global__ void FindExtrema(float *imd, float *imp, float *imn, int maxx, int pitch, int maxy, int border, float dthreshold, int scale)
+__global__ void FindExtrema(float *imd, float *imp, float *imn, int maxx, int pitch, int maxy, int border, float dthreshold, int scale, int octave, float size, cv::KeyPoint *pts, int maxpts)
 {
   int x = blockIdx.x*32 + threadIdx.x;
   int y = blockIdx.y*16 + threadIdx.y;
@@ -596,21 +612,40 @@ double HessianDeterminant(CudaImage &img, CudaImage &lx, CudaImage &ly, int step
   if (v>dthreshold && v>imd[p-pitch-1] && v>imd[p+pitch+1] && v>imd[p-pitch+1] && 
       v>imd[p-pitch+1] &&  v>imd[p-1] && v>imd[p+1] && v>imd[p+pitch] && 
       v>imd[p-pitch] && v>=imn[p] && v>=imp[p]) {
-    int s = 1<<(scale/4);
-    //printf("XXX %02d %03d %03d\n", scale, x*s, y*s);
-    printf("XXX %02d %03d %03d %f\n", scale, x*s, y*s, v);
+    float dx = 0.5f*(imd[p+1] - imd[p-1]);
+    float dy = 0.5f*(imd[p+pitch] - imd[p-pitch]);
+    float dxx = imd[p+1] + imd[p-1] - 2.0f*v;
+    float dyy = imd[p+pitch] + imd[p-pitch] - 2.0f*v;
+    float dxy = 0.25f*(imd[p+pitch+1] + imd[p-pitch-1] - imd[p+pitch-1] - imd[p-pitch+1]);
+    float det = dxx*dyy - dxy*dxy;
+    float idet = (det!=0.0f ? 1.0f/det : 0.0f);
+    float dst0 = idet*(dxy*dy - dyy*dx); 
+    float dst1 = idet*(dxy*dx - dxx*dy); 
+    if (dst0>=-1.0f && dst0<=1.0f && dst1>=-1.0f && dst1<=1.0f) {
+      unsigned int idx = atomicInc(d_PointCounter, 0x7fffffff);
+      if (idx<maxpts) {
+	cv::KeyPoint &point = pts[idx];
+	point.response = v;
+	point.size = 2.0f*size;
+	point.octave = octave;
+	point.class_id = scale;
+	int ratio = (1<<octave);
+	point.pt.x = ratio*(x + dst0);
+	point.pt.y = ratio*(y + dst1);
+	point.angle = 0.0f;
+	//printf("XXX %d %d %.2f %.2f XXX\n", x, y, dst0, dst1);
+      }
+    } 
   }
 }
 
-double FindExtrema(CudaImage &img, CudaImage &imgp, CudaImage &imgn, float border, float dthreshold, int scale)
+double FindExtrema(CudaImage &img, CudaImage &imgp, CudaImage &imgn, float border, float dthreshold, int scale, int octave, float size, cv::KeyPoint *pts, int maxpts)
 {
   TimerGPU timer0(0);
   dim3 blocks(iDivUp(img.width, 32), iDivUp(img.height, 16));
   dim3 threads(32, 16);
   int b = (int)border;
-  std::cout << img.d_data << " " << imgp.d_data << " " << imgn.d_data << std::endl;
-  std::cout << img.width << " " << imgp.width << " " << imgn.width << std::endl;
-  FindExtrema<<<blocks, threads>>>(img.d_data, imgp.d_data, imgn.d_data, img.width-b, img.pitch, img.height-b, b, dthreshold, scale);
+  FindExtrema<<<blocks, threads>>>(img.d_data, imgp.d_data, imgn.d_data, img.width-b, img.pitch, img.height-b, b, dthreshold, scale, octave, size, pts, maxpts);
   checkMsg("FindExtrema() execution failed\n");
   safeCall(cudaThreadSynchronize());
   double gpuTime = timer0.read();
@@ -619,3 +654,141 @@ double FindExtrema(CudaImage &img, CudaImage &imgp, CudaImage &imgn, float borde
 #endif
   return gpuTime;
 }
+
+void ClearPoints()
+{
+  int totPts = 0;
+  safeCall(cudaMemcpyToSymbol(d_PointCounter, &totPts, sizeof(int)));
+}
+
+int GetPoints(std::vector<cv::KeyPoint>& h_pts, cv::KeyPoint *d_pts)
+{
+  int numPts = 0;
+  safeCall(cudaMemcpyFromSymbol(&numPts, d_PointCounter, sizeof(int)));
+  h_pts.resize(numPts);
+  safeCall(cudaMemcpy((float*)&h_pts[0], d_pts, sizeof(cv::KeyPoint)*numPts, cudaMemcpyDeviceToHost));
+  return numPts;
+}
+
+__global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs, int size2, int size3, int size4)
+{
+  int p = blockIdx.x;
+  int tx = threadIdx.x;
+  int lev = d_pts[p].class_id;
+  float *imd = d_imgs[4*lev + 0].d_data;
+  float *dxd = d_imgs[4*lev + 2].d_data;
+  float *dyd = d_imgs[4*lev + 3].d_data;
+  int pitch = d_imgs[4*lev + 0].pitch;
+  int winsize = max(3*size3, 4*size4);
+  for (int i=tx;i<winsize*winsize;i+=EXTRACT_S) {
+    int y = i/winsize;
+    int x = i - winsize*y;
+    int m = max(x, y);
+    if (m<2*size2) {
+      int x2 = (x<size2 ? 0 : 1);
+      int y2 = (y<size2 ? 0 : 1);
+    }
+    if (m<3*size3) {
+      int x3 = (x<size3 ? 0 : (x<2*size3 ? 1 : 2));
+      int y3 = (y<size3 ? 0 : (y<2*size3 ? 1 : 2));
+    }
+    if (m<4*size4) {
+      int x4 = (x<2*size4 ? (x<size4 ? 0 : 1) : (x<3*size4/4 ? 2 : 3));
+      int y4 = (y<2*size4 ? (y<size4 ? 0 : 1) : (y<3*size4/4 ? 2 : 3));
+    }
+  }
+}
+
+double ExtractDescriptors(std::vector<cv::KeyPoint>& h_pts, cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, CudaImage *d_imgs, int patsize)
+{
+  int size2 = patsize;
+  int size3 = (int)(2.0f*patsize/3.0f + 0.5f);
+  int size4 = (int)(0.5f*patsize + 0.5f);
+  int numPts = h_pts.size();
+  TimerGPU timer0(0);
+  dim3 blocks(numPts);
+  dim3 threads(EXTRACT_S);
+  ExtractDescriptors<<<blocks, threads>>>(d_pts, d_imgs, size2, size3, size4);
+  checkMsg("ExtractDescriptors() execution failed\n");
+  safeCall(cudaThreadSynchronize());
+  double gpuTime = timer0.read();
+#ifdef VERBOSE
+  printf("ExtractDescriptors time =     %.2f ms\n", gpuTime);
+#endif
+  return gpuTime;
+}
+
+__global__ void FindOrientation(cv::KeyPoint *d_pts, CudaImage *d_imgs)
+{
+  __shared__ float resx[42], resy[42];
+  __shared__ float re8x[42], re8y[42];
+  int p = blockIdx.x;
+  int tx = threadIdx.x;
+  if (tx<48) 
+    resx[tx] = resy[tx] = 0.0f;
+  __syncthreads();
+  int lev = d_pts[p].class_id;
+  float *dxd = d_imgs[4*lev + 2].d_data;
+  float *dyd = d_imgs[4*lev + 3].d_data;
+  int pitch = d_imgs[4*lev + 0].pitch;
+  int octave = d_pts[p].octave;
+  int step = (int)(0.5f*d_pts[p].size + 0.5f) >> octave;
+  int x = (int)(d_pts[p].pt.x + 0.5f) >> octave;
+  int y = (int)(d_pts[p].pt.y + 0.5f) >> octave;
+  int i = (tx & 15) - 6;
+  int j = (tx / 16) - 6;
+  int r2 = i*i + j*j;
+  if (r2<36) {
+    float gweight = exp(-r2/(2.5f*2.5f*2.0f));
+    int pos = (y + step*j)*pitch + (x + step*i); 
+    float dx = gweight*dxd[pos];
+    float dy = gweight*dyd[pos];
+    float angle = atan2(dy, dx);
+    int a = max(min((int)(angle*(21/CV_PI)) + 21, 41), 0);
+    atomicAdd(resx + a, dx); 
+    atomicAdd(resy + a, dy); 
+  }
+  __syncthreads();
+  if (tx<42) {
+    re8x[tx] = resx[tx];
+    re8y[tx] = resy[tx];
+    for (int k=tx+1;k<tx+7;k++) {
+      re8x[tx] += resx[k<42 ? k : k-42];
+      re8y[tx] += resy[k<42 ? k : k-42];
+    }
+  }
+  __syncthreads();
+  if (tx==0) {
+    float maxr = 0.0f;
+    int maxk = 0;
+    for (int k=0;k<42;k++) {
+      float r = re8x[k]*re8x[k] + re8y[k]*re8y[k];
+      if (r>maxr) {
+	maxr = r;
+	maxk = k;
+      }
+    }
+    float angle = atan2(re8y[maxk], re8x[maxk]);
+    d_pts[p].angle = (angle<0.0f ? angle + 2.0f*CV_PI : angle);
+    //printf("XXX %.2f %.2f %.2f\n", d_pts[p].pt.x, d_pts[p].pt.y, d_pts[p].angle/CV_PI*180.0f);
+  }
+}
+
+double FindOrientation(std::vector<cv::KeyPoint>& h_pts, cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, CudaImage *d_imgs)
+{
+  safeCall(cudaMemcpy(d_imgs, (float*)&h_imgs[0], sizeof(CudaImage)*h_imgs.size(), cudaMemcpyHostToDevice));
+  int numPts = h_pts.size();
+  TimerGPU timer0(0);
+  dim3 blocks(numPts);
+  dim3 threads(ORIENT_S);
+  FindOrientation<<<blocks, threads>>>(d_pts, d_imgs);
+  checkMsg("FindOrientation() execution failed\n");
+  safeCall(cudaThreadSynchronize());
+  double gpuTime = timer0.read();
+#ifdef VERBOSE
+  printf("FindOrientation time =        %.2f ms\n", gpuTime);
+#endif
+  return gpuTime;
+}
+
+

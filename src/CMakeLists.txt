@@ -13,7 +13,7 @@ endif ()
 IF(UNIX)
   SET(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS} -g -O0  -Wall -Wextra -Wunused-variable -DDEBUG -D_DEBUG")
   SET(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS} -O0 -g  -Wall -Wextra -Wunused-variable -DDEBUG -D_DEBUG")
-  LIST(APPEND CUDA_NVCC_FLAGS "-arch=sm_35;-lineinfo;--compiler-options;-O2;-DVERBOSE")
+  LIST(APPEND CUDA_NVCC_FLAGS "-arch=sm_20;-lineinfo;--compiler-options;-O2;-DVERBOSE")
 ENDIF(UNIX)
 
 if(OPENMP_FOUND)

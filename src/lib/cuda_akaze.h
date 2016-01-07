@@ -1,7 +1,7 @@
 #include "AKAZEConfig.h"
 #include "cudaImage.h"
 
-void *AllocBuffers(int width, int height, int num, int omax, std::vector<float*> &buffers);
+float *AllocBuffers(int width, int height, int num, int omax, int maxpts, std::vector<CudaImage> &buffers, cv::KeyPoint *&pts, CudaImage *&ims);
 void FreeBuffers(float *buffers);
 double LowPass(CudaImage &inimg, CudaImage &outimg, CudaImage &temp, double var, int kernsize);
 double Scharr(CudaImage &img, CudaImage &lx, CudaImage &ly);
@@ -11,4 +11,8 @@ double HalfSample(CudaImage &inimg, CudaImage &outimg);
 double Copy(CudaImage &inimg, CudaImage &outimg);
 double ContrastPercentile(CudaImage &img, CudaImage &temp, CudaImage &blur, float perc, int nbins, float &contrast);
 double HessianDeterminant(CudaImage &img, CudaImage &lx, CudaImage &ly, int step);
-double FindExtrema(CudaImage &img, CudaImage &imgp, CudaImage &imgn, float border, float dthreshold, int scale);
+double FindExtrema(CudaImage &img, CudaImage &imgp, CudaImage &imgn, float border, float dthreshold, int scale, int octave, float size, cv::KeyPoint *pts, int maxpts);
+void ClearPoints();
+int GetPoints(std::vector<cv::KeyPoint>& h_pts, cv::KeyPoint *d_pts);
+double FindOrientation(std::vector<cv::KeyPoint>& h_pts, cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, CudaImage *d_imgs);
+double ExtractDescriptors(std::vector<cv::KeyPoint>& h_pts, cv::KeyPoint *d_pts, std::vector<CudaImage> &cuda_buffers, CudaImage *cuda_images, int patsize);
