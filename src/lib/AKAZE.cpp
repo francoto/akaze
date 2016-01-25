@@ -609,7 +609,7 @@ void AKAZE::Compute_Descriptors(std::vector<cv::KeyPoint>& kpts, cv::Mat& desc) 
   int pattern_size = options_.descriptor_pattern_size;
   FindOrientation(kpts, cuda_points, cuda_buffers, cuda_images);  
   GetPoints(kpts, cuda_points); //%%%%
-  //ExtractDescriptors(kpts, cuda_points, cuda_buffers, cuda_images, pattern_size);
+  ExtractDescriptors(kpts, cuda_points, cuda_buffers, cuda_images, pattern_size);
 #endif
 
   switch (options_.descriptor) {
@@ -1167,6 +1167,8 @@ void AKAZE::Get_MLDB_Full_Descriptor(const cv::KeyPoint& kpt, unsigned char* des
   float co = cos(kpt.angle);
   float si = sin(kpt.angle);
   int pattern_size = options_.descriptor_pattern_size;
+  if (xf>624 && xf<625 && yf>29 && yf<30)
+    printf("XXXY %.2f %.2f\n", scale, kpt.angle);
 
   int dpos = 0;
   for(int lvl = 0; lvl < 3; lvl++) {
@@ -1230,12 +1232,15 @@ void AKAZE::MLDB_Fill_Values(float* values, int sample_step, int level,
           if(nr_channels > 1) {
             float rx = *(evolution_[level].Lx.ptr<float>(y1)+x1);
             float ry = *(evolution_[level].Ly.ptr<float>(y1)+x1);
+
             if (nr_channels == 2) {
               dx += sqrtf(rx*rx + ry*ry);
             }
             else {
               float rry = rx*co + ry*si;
               float rrx = -rx*si + ry*co;
+	      //if (xf>624 && xf<625 && yf>29 && yf<30)
+	      //	printf("XXX %02d %02d %03d %03d %.2f %.2f %.2f %.2f %.2f X\n", l+pattern_size, k+pattern_size, x1, y1, ri, rx, ry, rrx, rry);
               dx += rrx;
               dy += rry;
             }

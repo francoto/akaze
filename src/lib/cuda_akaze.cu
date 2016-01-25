@@ -673,6 +673,13 @@ int GetPoints(std::vector<cv::KeyPoint>& h_pts, cv::KeyPoint *d_pts)
 __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs, int size2, int size3, int size4)
 {
   int p = blockIdx.x;
+  float iratio = 1.0f/(1 << d_pts[p].octave);
+  int scale = (int)(0.5f*d_pts[p].size*iratio + 0.5f);
+  float xf = d_pts[p].pt.x*iratio;
+  float yf = d_pts[p].pt.y*iratio;
+  float ang = d_pts[p].angle;
+  float co = cos(ang);
+  float si = sin(ang);
   int tx = threadIdx.x;
   int lev = d_pts[p].class_id;
   float *imd = d_imgs[4*lev + 0].d_data;
@@ -680,10 +687,26 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs, int s
   float *dyd = d_imgs[4*lev + 3].d_data;
   int pitch = d_imgs[4*lev + 0].pitch;
   int winsize = max(3*size3, 4*size4);
+  //if (p==0 && tx==0)
+  //  printf("XXXX %.2f %d %.2f %.2f %.2f\n", iratio, scale, xf, yf, ang);
   for (int i=tx;i<winsize*winsize;i+=EXTRACT_S) {
     int y = i/winsize;
     int x = i - winsize*y;
     int m = max(x, y);
+    if (m>=winsize)
+      continue;
+    int l = x - size2;
+    int k = y - size2;
+    int xp = (int)(xf + scale*(k*co - l*si) + 0.5f);
+    int yp = (int)(yf + scale*(k*si + l*co) + 0.5f);
+    int pos = yp*pitch + xp;
+    float im = imd[pos];
+    float dx = dxd[pos];
+    float dy = dyd[pos];
+    float rx = -dx*si + dy*co;
+    float ry = dx*co + dy*si;
+    //if (p==0)
+    //  printf("XXX %02d %02d %03d %03d %.2f %.2f %.2f %.2f %.2f\n", x, y, xp, yp, im, dx, dy, rx, ry);
     if (m<2*size2) {
       int x2 = (x<size2 ? 0 : 1);
       int y2 = (y<size2 ? 0 : 1);
