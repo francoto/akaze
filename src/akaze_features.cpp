@@ -23,8 +23,10 @@
 #include "./lib/AKAZE.h"
 
 // OpenCV
-#include <opencv2/imgproc/imgproc.hpp>
-#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/highgui.hpp>
+
+#include <cuda_profiler_api.h>
 
 using namespace std;
 
@@ -76,6 +78,23 @@ int main(int argc, char *argv[]) {
   libAKAZE::AKAZE evolution(options);
   vector<cv::KeyPoint> kpts;
 
+  int a[100000], b[100000];
+
+  for( int j=0; j<100; ++j) {
+#pragma omp parallel for
+  for( int i=0; i<1000; ++i) {
+      a[i] = i;
+      b[i] = 2*i;
+  }
+  }
+
+  int ss = 0;
+  for( int i=0; i<1000; ++i) {
+      ss += a[i] + b[i];
+  }
+  std::cout << "sum: " << ss << std::endl;
+
+//  for( int i=0; i<10; ++i) {
   t1 = cv::getTickCount();
   evolution.Create_Nonlinear_Scale_Space(img_32);
   evolution.Feature_Detection(kpts);
@@ -88,24 +107,32 @@ int main(int argc, char *argv[]) {
   evolution.Compute_Descriptors(kpts, desc);
   t2 = cv::getTickCount();
   tdesc = 1000.0*(t2-t1) / cv::getTickFrequency();
+  cudaProfilerStop();
+  
+  if (true) {
 
-  // Summarize the computation times.
-  evolution.Show_Computation_Times();
+    // Summarize the computation times.
+    evolution.Show_Computation_Times();
 
-  cout << "Number of points: " << kpts.size() << endl;
-  cout << "Time Detector: " << tdet << " ms" << endl;
-  cout << "Time Descriptor: " << tdesc << " ms" << endl;
+    cout << "Number of points: " << kpts.size() << endl;
+    cout << "Time Detector: " << tdet << " ms" << endl;
+    cout << "Time Descriptor: " << tdesc << " ms" << endl;
+
+    /*cv::Mat img_rgb = cv::Mat(cv::Size(img.cols, img.rows), CV_8UC3);
+    cvtColor(img,img_rgb, cv::COLOR_GRAY2BGR);
+    draw_keypoints(img_rgb, kpts);
+
+    cv::namedWindow("A-KAZE", cv::WINDOW_AUTOSIZE);
+    cv::imshow("A-KAZE", img_rgb);
+    cv::waitKey(0);*/
+
+  }
 
   // Save keypoints in ASCII format
   if (!kpts_path.empty())
     save_keypoints(kpts_path, kpts, desc, true);
 
-  // Check out the result visually
-  cv::Mat img_rgb = cv::Mat(cv::Size(img.cols, img.rows), CV_8UC3);
-  cvtColor(img,img_rgb, cv::COLOR_GRAY2BGR);
-  draw_keypoints(img_rgb, kpts);
-  cv::imshow(img_path, img_rgb);
-  cv::waitKey(0);
+  //  }
 }
 
 /* ************************************************************************* */
@@ -238,6 +265,16 @@ int parse_input_options(AKAZEOptions& options, std::string& img_path,
         }
         else {
           options.save_scale_space = (bool)atoi(argv[i]);
+        }
+      }
+      else if (!strcmp(argv[i],"--show_results")) {
+        i = i+1;
+        if (i >= argc) {
+          cerr << "Error introducing input options!!" << endl;
+          return -1;
+        }
+        else {
+	    //options.show_results = (bool)atoi(argv[i]);
         }
       }
       else if (!strcmp(argv[i],"--verbose")) {

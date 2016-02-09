@@ -32,7 +32,7 @@ if(OPENMP_FOUND)
     endif(UNIX)
 endif(OPENMP_FOUND)
 
-SET(CUDASIFT /home/celle/CudaSift)
+SET(CUDASIFT /home/niklas/dev/src/CudaSift)
 
 # ============================================================================ #
 # Create projects

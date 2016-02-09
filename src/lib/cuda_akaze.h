@@ -15,4 +15,4 @@ double FindExtrema(CudaImage &img, CudaImage &imgp, CudaImage &imgn, float borde
 void ClearPoints();
 int GetPoints(std::vector<cv::KeyPoint>& h_pts, cv::KeyPoint *d_pts);
 double FindOrientation(std::vector<cv::KeyPoint>& h_pts, cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, CudaImage *d_imgs);
-double ExtractDescriptors(std::vector<cv::KeyPoint>& h_pts, cv::KeyPoint *d_pts, std::vector<CudaImage> &cuda_buffers, CudaImage *cuda_images, int patsize);
+double ExtractDescriptors(std::vector<cv::KeyPoint>& h_pts, cv::KeyPoint *d_pts, std::vector<CudaImage> &cuda_buffers, CudaImage *cuda_images, unsigned char* desc_h, int patsize);
