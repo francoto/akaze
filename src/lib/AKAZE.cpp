@@ -140,7 +140,7 @@ int AKAZE::Create_Nonlinear_Scale_Space(const cv::Mat& img) {
   Copy(Lt, Lsmooth);
 
   Lt.h_data = (float*)ev.Lt.data;
-  //Lt.Readback();
+  Lt.Readback();
 
   t2 = cv::getTickCount();
   timing_.kcontrast = 1000.0 * (t2 - t1) / cv::getTickFrequency();
@@ -171,7 +171,7 @@ int AKAZE::Create_Nonlinear_Scale_Space(const cv::Mat& img) {
     }
 
     Lt.h_data = (float*)evn.Lt.data;
-    //Lt.Readback();
+    Lt.Readback();
   }
 
 #else
@@ -275,9 +275,9 @@ void AKAZE::Feature_Detection(std::vector<cv::KeyPoint>& kpts) {
     HessianDeterminant(Lsmooth, Lx, Ly, sigma_size_);
 
     Lx.h_data = (float*)evolution_[i].Lx.data;
-    //Lx.Readback();
+    Lx.Readback();
     Ly.h_data = (float*)evolution_[i].Ly.data;
-    //Ly.Readback();
+    Ly.Readback();
   }
   t2 = cv::getTickCount();
   timing_.derivatives = 1000.0 * (t2 - t1) / cv::getTickFrequency();

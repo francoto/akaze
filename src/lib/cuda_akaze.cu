@@ -763,19 +763,22 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
   float *dyd = d_imgs[4 * lev + 3].d_data;
   int pitch = d_imgs[4 * lev + 0].pitch;
   int winsize = max(3 * size3, 4 * size4);
-  // if (p==0 && tx==0)
-  //  printf("XXXX %.2f %d %.2f %.2f %.2f\n", iratio, scale, xf, yf, ang);
-  // 2x2 - iterate y = 0..1, x = 0..1
 
-  float norm2 = 0;
-  float norm3 = 0;
-  float norm4 = 0;
+  __shared__ int norm2[1];
+  __shared__ int norm3[1];
+  __shared__ int norm4[1];
+
+  norm2[0] = 0;
+  norm3[0] = 0;
+  norm4[0] = 0;
 
   for (int i = 0; i < 29; ++i) {
     acc_vals_im[i * EXTRACT_S + tx] = 0.f;
     acc_vals_dx[i * EXTRACT_S + tx] = 0.f;
     acc_vals_dy[i * EXTRACT_S + tx] = 0.f;
   }
+
+  __syncthreads();
 
   for (int i = tx; i < winsize * winsize; i += EXTRACT_S) {
     int y = i / winsize;
@@ -792,78 +795,88 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
     float dy = dyd[pos];
     float rx = -dx * si + dy * co;
     float ry = dx * co + dy * si;
-    // if (p==0)
-    //  printf("XXX %02d %02d %03d %03d %.2f %.2f %.2f %.2f %.2f\n", x, y, xp,
-    //  yp, im, dx, dy, rx, ry);
+
     if (m < 2 * size2) {
       int x2 = (x < size2 ? 0 : 1);
       int y2 = (y < size2 ? 0 : 1);
+      //atomicAdd(norm2, (x < size2 && y < size2 ? 1 : 0));
       // Add 2x2
-      acc_vals_im[(y2 * 2 + x2) * tx] += im;
-      acc_vals_dx[(y2 * 2 + x2) * tx] += rx;
-      acc_vals_dy[(y2 * 2 + x2) * tx] += ry;
+      acc_vals_im[(y2 * 2 + x2) + 29 * tx] += im;
+      acc_vals_dx[(y2 * 2 + x2) + 29 * tx] += rx;
+      acc_vals_dy[(y2 * 2 + x2) + 29 * tx] += ry;
     }
     if (m < 3 * size3) {
       int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
       int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
+      //atomicAdd(norm3, (x < size3 && y < size3 ? 1 : 0));
       // Add 3x3
-      acc_vals_im[(4 + y3 * 3 + x3) * tx] += im;
-      acc_vals_dx[(4 + y3 * 3 + x3) * tx] += rx;
-      acc_vals_dy[(4 + y3 * 3 + x3) * tx] += ry;
+      acc_vals_im[(4 + y3 * 3 + x3) + 29 * tx] += im;
+      acc_vals_dx[(4 + y3 * 3 + x3) + 29 * tx] += rx;
+      acc_vals_dy[(4 + y3 * 3 + x3) + 29 * tx] += ry;
     }
     if (m < 4 * size4) {
-      int x4 =
-          (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 / 4 ? 2 : 3));
-      int y4 =
-          (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 / 4 ? 2 : 3));
+      int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
+      int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
+      //atomicAdd(norm4, (x < size4 && y < size4 ? 1 : 0));
       // Add 4x4
-      acc_vals_im[(4 + 9 + y4 * 2 + x4) * tx] += im;
-      acc_vals_dx[(4 + 9 + y4 * 2 + x4) * tx] += rx;
-      acc_vals_dy[(4 + 9 + y4 * 2 + x4) * tx] += ry;
+      acc_vals_im[(4 + 9 + y4 * 4 + x4) + 29 * tx] += im;
+      acc_vals_dx[(4 + 9 + y4 * 4 + x4) + 29 * tx] += rx;
+      acc_vals_dy[(4 + 9 + y4 * 4 + x4) + 29 * tx] += ry;
     }
   }
 
   __syncthreads();
 
   // Reduce stuff
-  for (int i = 0; i < 29; ++i) {
-    if (tx < 32) {
-      acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 32) + i];
-      acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 32) + i];
-      acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 32) + i];
+    for (int i = 0; i < 29; ++i) {
+      if (tx < 32) {
+        acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 32) + i];
+        acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 32) + i];
+        acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 32) + i];
+      }
+      if (tx < 16) {
+        acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 16) + i];
+        acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 16) + i];
+        acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 16) + i];
+      }
+      if (tx < 8) {
+        acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 8) + i];
+        acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 8) + i];
+        acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 8) + i];
+      }
+      if (tx < 4) {
+        acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 4) + i];
+        acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 4) + i];
+        acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 4) + i];
+      }
+      if (tx < 2) {
+        acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 2) + i];
+        acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 2) + i];
+        acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 2) + i];
+      }
+      if (tx < 1) {
+        acc_vals_im[i] += acc_vals_im[29 + i];
+        acc_vals_dx[i] += acc_vals_dx[29 + i];
+        acc_vals_dy[i] += acc_vals_dy[29 + i];
+      }
     }
-    if (tx < 16) {
-      acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 16) + i];
-      acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 16) + i];
-      acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 16) + i];
-    }
-    if (tx < 8) {
-      acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 8) + i];
-      acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 8) + i];
-      acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 8) + i];
-    }
-    if (tx < 4) {
-      acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 4) + i];
-      acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 4) + i];
-      acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 4) + i];
-    }
-    if (tx < 2) {
-      acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 2) + i];
-      acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 2) + i];
-      acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 2) + i];
-    }
-    if (tx < 1) {
-      acc_vals_im[i] += acc_vals_im[29 + i];
-      acc_vals_dx[i] += acc_vals_dx[29 + i];
-      acc_vals_dy[i] += acc_vals_dy[29 + i];
-    }
-  }
 
-  if (tx < 29) {
-    vals[tx] = acc_vals_im[tx];       // / (tx < 4 ? 4 : (tx < 13 ? 9 : 16));
-    vals[29 + tx] = acc_vals_dx[tx];  // / (tx < 4 ? 4 : (tx < 13 ? 9 : 16));
-    vals[2 * 29 + tx] =
-        acc_vals_dy[tx];  // / (tx < 4 ? 4 : (tx < 13 ? 9 : 16));
+  if (tx == 0) {
+    for (int i = 0; i < 4; ++i) {
+      vals[3 * i] = acc_vals_im[i];      // / (float)norm2[0];
+      vals[3 * i + 1] = acc_vals_dx[i];  // / (float)norm2[0];
+      vals[3 * i + 2] = acc_vals_dy[i];  // / (float)norm2[0];
+    }
+    for (int i = 0; i < 9; ++i) {
+      vals[12 + 3 * i] = acc_vals_im[i + 4];      // / (float)norm3[0];
+      vals[12 + 3 * i + 1] = acc_vals_dx[i + 4];  // / (float)norm3[0];
+      vals[12 + 3 * i + 2] = acc_vals_dy[i + 4];  // / (float)norm3[0];
+    }
+    for (int i = 0; i < 16; ++i) {
+      vals[39 + 3 * i] = acc_vals_im[i + 13];      // / (float)norm4[0];
+      vals[39 + 3 * i + 1] = acc_vals_dx[i + 13];  // / (float)norm4[0];
+      vals[39 + 3 * i + 2] = acc_vals_dy[i + 13];  // / (float)norm4[0];
+    }
   }
 
   // acc_vals[0..28] is used to create feature vector
@@ -978,8 +991,8 @@ __global__ void BuildDescriptor(float *_valsim, unsigned char *_desc) {
 
   unsigned char *desc = &_desc[61 * p];
 
-  for( int i=0; i<64; ++i) {
-      (desc_s)[i] = 0;
+  for (int i = 0; i < 64; ++i) {
+    (desc_s)[i] = 0;
   }
 
   __syncthreads();
@@ -1056,10 +1069,9 @@ __global__ void BuildDescriptor(float *_valsim, unsigned char *_desc) {
 
   __syncthreads();
 
-  for( int i=0; i<61; ++i) {
-      (desc)[i] = (desc_s)[i];
+  for (int i = 0; i < 61; ++i) {
+    (desc)[i] = (desc_s)[i];
   }
-
 }
 
 double ExtractDescriptors(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts,
@@ -1077,12 +1089,12 @@ double ExtractDescriptors(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts,
   float *vals_d;
   cudaMalloc(&vals_d, 3 * 29 * numPts * sizeof(float));
 
-  // ExtractDescriptors<<<blocks, threads>>>(d_pts, d_imgs, vals_d, size2,
-  // size3, size4);
-  ExtractDescriptorsSerial << <blocks, 1>>>
+  ExtractDescriptors << <blocks, threads>>>
       (d_pts, d_imgs, vals_d, size2, size3, size4);
-  cudaMemcpy(vals_h, vals_d, 3 * 29 * numPts * sizeof(float),
-             cudaMemcpyDeviceToHost);
+  // ExtractDescriptorsSerial << <blocks, 1>>>
+  //    (d_pts, d_imgs, vals_d, size2, size3, size4);
+  //cudaMemcpy(vals_h, vals_d, 3 * 29 * numPts * sizeof(float),
+  //           cudaMemcpyDeviceToHost);
 
   int idx = 0;
   for (; idx < h_pts.size(); ++idx) {
