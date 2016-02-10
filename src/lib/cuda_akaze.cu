@@ -741,9 +741,12 @@ int GetPoints(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts) {
 __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
                                    float *_vals, int size2, int size3,
                                    int size4) {
-  __shared__ float acc_vals_im[29 * EXTRACT_S];
-  __shared__ float acc_vals_dx[29 * EXTRACT_S];
-  __shared__ float acc_vals_dy[29 * EXTRACT_S];
+
+    __shared__ float acc_vals[3*30*EXTRACT_S];
+
+  float *acc_vals_im = &acc_vals[0];
+  float *acc_vals_dx = &acc_vals[30*EXTRACT_S];
+  float *acc_vals_dy = &acc_vals[2*30*EXTRACT_S];
 
   int p = blockIdx.x;
 
@@ -772,13 +775,15 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
   norm3[0] = 0;
   norm4[0] = 0;
 
-  for (int i = 0; i < 29; ++i) {
+  for (int i = 0; i < 30; ++i) {
     acc_vals_im[i * EXTRACT_S + tx] = 0.f;
     acc_vals_dx[i * EXTRACT_S + tx] = 0.f;
     acc_vals_dy[i * EXTRACT_S + tx] = 0.f;
   }
 
   __syncthreads();
+
+
 
   for (int i = tx; i < winsize * winsize; i += EXTRACT_S) {
     int y = i / winsize;
@@ -801,85 +806,89 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
       int y2 = (y < size2 ? 0 : 1);
       //atomicAdd(norm2, (x < size2 && y < size2 ? 1 : 0));
       // Add 2x2
-      acc_vals_im[(y2 * 2 + x2) + 29 * tx] += im;
-      acc_vals_dx[(y2 * 2 + x2) + 29 * tx] += rx;
-      acc_vals_dy[(y2 * 2 + x2) + 29 * tx] += ry;
+      acc_vals[3*(y2 * 2 + x2) + 3*30 * tx] += im;
+      acc_vals[3*(y2 * 2 + x2) + 3*30 * tx+1] += rx;
+      acc_vals[3*(y2 * 2 + x2) + 3*30 * tx+2] += ry;
+//      acc_vals_im[(y2 * 2 + x2) + 30 * tx] += im;
+//      acc_vals_dx[(y2 * 2 + x2) + 30 * tx] += rx;
+//      acc_vals_dy[(y2 * 2 + x2) + 30 * tx] += ry;
     }
     if (m < 3 * size3) {
       int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
       int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
       //atomicAdd(norm3, (x < size3 && y < size3 ? 1 : 0));
       // Add 3x3
-      acc_vals_im[(4 + y3 * 3 + x3) + 29 * tx] += im;
-      acc_vals_dx[(4 + y3 * 3 + x3) + 29 * tx] += rx;
-      acc_vals_dy[(4 + y3 * 3 + x3) + 29 * tx] += ry;
+      acc_vals[3*(4 + y3 * 3 + x3) + 3*30 * tx] += im;
+      acc_vals[3*(4 + y3 * 3 + x3) + 3*30 * tx+1] += rx;
+      acc_vals[3*(4 + y3 * 3 + x3) + 3*30 * tx+2] += ry;
+//      acc_vals_im[(4 + y3 * 3 + x3) + 30 * tx] += im;
+//      acc_vals_dx[(4 + y3 * 3 + x3) + 30 * tx] += rx;
+//      acc_vals_dy[(4 + y3 * 3 + x3) + 30 * tx] += ry;
     }
     if (m < 4 * size4) {
       int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
       int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
       //atomicAdd(norm4, (x < size4 && y < size4 ? 1 : 0));
       // Add 4x4
-      acc_vals_im[(4 + 9 + y4 * 4 + x4) + 29 * tx] += im;
-      acc_vals_dx[(4 + 9 + y4 * 4 + x4) + 29 * tx] += rx;
-      acc_vals_dy[(4 + 9 + y4 * 4 + x4) + 29 * tx] += ry;
+      acc_vals[3*(4 + 9 + y4 * 4 + x4) + 3*30 * tx] += im;
+      acc_vals[3*(4 + 9 + y4 * 4 + x4) + 3*30 * tx+1] += rx;
+      acc_vals[3*(4 + 9 + y4 * 4 + x4) + 3*30 * tx+2] += ry;
+//      acc_vals_im[(4 + 9 + y4 * 4 + x4) + 30 * tx] += im;
+//      acc_vals_dx[(4 + 9 + y4 * 4 + x4) + 30 * tx] += rx;
+//      acc_vals_dy[(4 + 9 + y4 * 4 + x4) + 30 * tx] += ry;
     }
   }
 
   __syncthreads();
 
   // Reduce stuff
-    for (int i = 0; i < 29; ++i) {
-      if (tx < 32) {
-        acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 32) + i];
-        acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 32) + i];
-        acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 32) + i];
+#pragma unroll
+    for (int i = 0; i < 15; ++i) {
+        // 0..31 takes care of even accs, 32..63 takes care of odd accs
+        int offset = 2*i + (tx < 32 ? 0 : 1);
+        int tx_d = tx < 32 ? tx : tx-32;
+      if (tx_d < 32) {
+        acc_vals[3*30 * tx_d + offset] += acc_vals[3*30 * (tx_d + 32) + offset];
+        acc_vals[3*30 * tx_d + offset+30] += acc_vals[3*30 * (tx_d + 32) + offset+30];
+        acc_vals[3*30 * tx_d + offset+60] += acc_vals[3*30 * (tx_d + 32) + offset+60];
       }
-      if (tx < 16) {
-        acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 16) + i];
-        acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 16) + i];
-        acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 16) + i];
+      if (tx_d < 16) {
+        acc_vals[3*30 * tx_d + offset] += acc_vals[3*30 * (tx_d + 16) + offset];
+        acc_vals[3*30 * tx_d + offset+30] += acc_vals[3*30 * (tx_d + 16) + offset+30];
+        acc_vals[3*30 * tx_d + offset+60] += acc_vals[3*30 * (tx_d + 16) + offset+60];
       }
-      if (tx < 8) {
-        acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 8) + i];
-        acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 8) + i];
-        acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 8) + i];
+      if (tx_d < 8) {
+        acc_vals[3*30 * tx_d + offset] += acc_vals[3*30 * (tx_d + 8) + offset];
+        acc_vals[3*30 * tx_d + offset+30] += acc_vals[3*30 * (tx_d + 8) + offset+30];
+        acc_vals[3*30 * tx_d + offset+60] += acc_vals[3*30 * (tx_d + 8) + offset+60];
       }
-      if (tx < 4) {
-        acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 4) + i];
-        acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 4) + i];
-        acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 4) + i];
+      if (tx_d < 4) {
+        acc_vals[3*30 * tx_d + offset] += acc_vals[3*30 * (tx_d + 4) + offset];
+        acc_vals[3*30 * tx_d + offset+30] += acc_vals[3*30 * (tx_d + 4) + offset+30];
+        acc_vals[3*30 * tx_d + offset+60] += acc_vals[3*30 * (tx_d + 4) + offset+60];
       }
-      if (tx < 2) {
-        acc_vals_im[29 * tx + i] += acc_vals_im[29 * (tx + 2) + i];
-        acc_vals_dx[29 * tx + i] += acc_vals_dx[29 * (tx + 2) + i];
-        acc_vals_dy[29 * tx + i] += acc_vals_dy[29 * (tx + 2) + i];
+      if (tx_d < 2) {
+        acc_vals[3*30 * tx_d + offset] += acc_vals[3*30 * (tx_d + 2) + offset];
+        acc_vals[3*30 * tx_d + offset+30] += acc_vals[3*30 * (tx_d + 2) + offset+30];
+        acc_vals[3*30 * tx_d + offset+60] += acc_vals[3*30 * (tx_d + 2) + offset+60];
       }
-      if (tx < 1) {
-        acc_vals_im[i] += acc_vals_im[29 + i];
-        acc_vals_dx[i] += acc_vals_dx[29 + i];
-        acc_vals_dy[i] += acc_vals_dy[29 + i];
+      if (tx_d < 1) {
+        acc_vals[offset] += acc_vals[3*30 + offset];
+        acc_vals[offset+30] += acc_vals[3*30 + offset+30];
+        acc_vals[offset+60] += acc_vals[3*30 + offset+60];
       }
     }
 
-  if (tx == 0) {
-    for (int i = 0; i < 4; ++i) {
-      vals[3 * i] = acc_vals_im[i];      // / (float)norm2[0];
-      vals[3 * i + 1] = acc_vals_dx[i];  // / (float)norm2[0];
-      vals[3 * i + 2] = acc_vals_dy[i];  // / (float)norm2[0];
-    }
-    for (int i = 0; i < 9; ++i) {
-      vals[12 + 3 * i] = acc_vals_im[i + 4];      // / (float)norm3[0];
-      vals[12 + 3 * i + 1] = acc_vals_dx[i + 4];  // / (float)norm3[0];
-      vals[12 + 3 * i + 2] = acc_vals_dy[i + 4];  // / (float)norm3[0];
-    }
-    for (int i = 0; i < 16; ++i) {
-      vals[39 + 3 * i] = acc_vals_im[i + 13];      // / (float)norm4[0];
-      vals[39 + 3 * i + 1] = acc_vals_dx[i + 13];  // / (float)norm4[0];
-      vals[39 + 3 * i + 2] = acc_vals_dy[i + 13];  // / (float)norm4[0];
-    }
-  }
+    __syncthreads();
 
-  // acc_vals[0..28] is used to create feature vector
+    // Have 29*3 values to store
+    // They are in acc_vals[0..28,64*30..64*30+28,64*60..64*60+28]
+    if(tx < 29) {
+        vals[tx] = acc_vals[tx];
+        vals[29+tx] = acc_vals[29+tx];
+        vals[2*29+tx] = acc_vals[2*29+tx];
+    }
+
 }
 
 __global__ void ExtractDescriptorsSerial(cv::KeyPoint *d_pts, CudaImage *d_imgs,
@@ -1093,8 +1102,8 @@ double ExtractDescriptors(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts,
       (d_pts, d_imgs, vals_d, size2, size3, size4);
   // ExtractDescriptorsSerial << <blocks, 1>>>
   //    (d_pts, d_imgs, vals_d, size2, size3, size4);
-  //cudaMemcpy(vals_h, vals_d, 3 * 29 * numPts * sizeof(float),
-  //           cudaMemcpyDeviceToHost);
+  cudaMemcpy(vals_h, vals_d, 3 * 29 * numPts * sizeof(float),
+             cudaMemcpyDeviceToHost);
 
   int idx = 0;
   for (; idx < h_pts.size(); ++idx) {
@@ -1123,7 +1132,15 @@ double ExtractDescriptors(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts,
   std::cout << "Keypoint idx: " << idx << std::endl;
 
   std::cout << "GPU output:\n";
-  for (int i = 0; i < 3 * 29; ++i) {
+  for (int i = 0; i < 12; ++i) {
+    std::cout << vals_h[3 * 29 * idx + i] << " ";
+  }
+  std::cout << std::endl;
+  for (int i = 12; i < 39; ++i) {
+    std::cout << vals_h[3 * 29 * idx + i] << " ";
+  }
+  std::cout << std::endl;
+  for (int i = 39; i < 3*29; ++i) {
     std::cout << vals_h[3 * 29 * idx + i] << " ";
   }
   std::cout << std::endl;

@@ -1284,9 +1284,9 @@ void AKAZE::MLDB_Fill_Values(float* values, int sample_step, int level,
         }
       }
 
-      di /= nsamples;
-      dx /= nsamples;
-      dy /= nsamples;
+      di;// /= nsamples;
+      dx;// /= nsamples;
+      dy;// /= nsamples;
 
       values[valpos] = di;
 
