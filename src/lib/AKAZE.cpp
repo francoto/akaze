@@ -140,7 +140,7 @@ int AKAZE::Create_Nonlinear_Scale_Space(const cv::Mat& img) {
   Copy(Lt, Lsmooth);
 
   Lt.h_data = (float*)ev.Lt.data;
-  Lt.Readback();
+  //Lt.Readback();
 
   t2 = cv::getTickCount();
   timing_.kcontrast = 1000.0 * (t2 - t1) / cv::getTickFrequency();
@@ -171,7 +171,7 @@ int AKAZE::Create_Nonlinear_Scale_Space(const cv::Mat& img) {
     }
 
     Lt.h_data = (float*)evn.Lt.data;
-    Lt.Readback();
+    //Lt.Readback();
   }
 
 #else
@@ -275,9 +275,9 @@ void AKAZE::Feature_Detection(std::vector<cv::KeyPoint>& kpts) {
     HessianDeterminant(Lsmooth, Lx, Ly, sigma_size_);
 
     Lx.h_data = (float*)evolution_[i].Lx.data;
-    Lx.Readback();
+    //Lx.Readback();
     Ly.h_data = (float*)evolution_[i].Ly.data;
-    Ly.Readback();
+    //Ly.Readback();
   }
   t2 = cv::getTickCount();
   timing_.derivatives = 1000.0 * (t2 - t1) / cv::getTickFrequency();
@@ -312,7 +312,25 @@ void AKAZE::Feature_Detection(std::vector<cv::KeyPoint>& kpts) {
     FindExtrema(Ldet, LdetP, LdetN, border, thresh, i, evolution_[i].octave,
                 size, cuda_points, options_.maxkeypoints);
   }
+  std::cout << "GetPoint 1\n";
   GetPoints(kpts, cuda_points);
+
+
+  float minx = 10000;
+  float maxx = 0;
+  float miny = 10000;
+  float maxy = 0;
+  for(int i=0; i<kpts.size(); ++i) {
+      cv::KeyPoint& k = kpts[i];
+      minx = min(minx,k.pt.x);
+      maxx = max(maxx,k.pt.x);
+      miny = min(miny,k.pt.y);
+      maxy = max(maxy,k.pt.y);
+  }
+
+
+  std::cout << "Min and max keypoint coordinates: " << minx << " " << miny << " " << maxx << " " << maxy << std::endl;
+
 
   double t3 = cv::getTickCount();
   timing_.extrema = 1000.0 * (t3 - t2) / cv::getTickFrequency();
@@ -624,6 +642,7 @@ void AKAZE::Compute_Descriptors(std::vector<cv::KeyPoint>& kpts,
   delete[] desc_h;
 #endif
 
+#if 0
   switch (options_.descriptor) {
     case SURF_UPRIGHT:  // Upright descriptors, not invariant to rotation
     {
@@ -687,6 +706,7 @@ void AKAZE::Compute_Descriptors(std::vector<cv::KeyPoint>& kpts,
       }
     } break;
   }
+#endif
 
   t2 = cv::getTickCount();
   timing_.descriptor = 1000.0 * (t2 - t1) / cv::getTickFrequency();
@@ -1185,30 +1205,35 @@ void AKAZE::Get_MLDB_Full_Descriptor(const cv::KeyPoint& kpt,
 
   int dpos = 0;
 
-  if ((int)kpt.pt.x == 840 && (int)kpt.pt.y == 45)
-    std::cout << "CPU output " << std::endl;
+  int xkpt = 865, ykpt = 30;
+//  int xkpt = 840, ykpt = 45;
 
+  if ((int)kpt.pt.x == 865 && (int)kpt.pt.y == 30) {
+    std::cout << "CPU output " << std::endl;
+    }
   for (int lvl = 0; lvl < 3; lvl++) {
     int val_count = (lvl + 2) * (lvl + 2);
     int sample_step = static_cast<int>(ceil(pattern_size * size_mult[lvl]));
     MLDB_Fill_Values(values, sample_step, kpt.class_id, xf, yf, co, si, scale);
 
-    if ((int)kpt.pt.x == 840 && (int)kpt.pt.y == 45) {
+    if ((int)kpt.pt.x == 865 && (int)kpt.pt.y == 30) {
+      std::cout << lvl << "\n";
       for (int i = 0; i < 3 * val_count; ++i) {
         std::cout << values[i] << " ";
       }
+      std::cout << std::endl;
     }
     float sum = 0;
     for (int i = 0; i < val_count; ++i) {
       sum += values[3 * i];
     }
-    if ((int)kpt.pt.x == 840 && (int)kpt.pt.y == 45)
+    if ((int)kpt.pt.x == 840 && (int)kpt.pt.y == 30)
       std::cout << "\nsums cpu: " << sum << std::endl;
 
     MLDB_Binary_Comparisons(values, desc, val_count, dpos);
   }
-  if ((int)kpt.pt.x == 840 && (int)kpt.pt.y == 45) {
-    std::cout << std::endl;
+  if ((int)kpt.pt.x == 865 && (int)kpt.pt.y == 30) {
+    std::cout << "descriptor " << std::endl;
     for (int i = 0; i < 61; ++i) {
       std::cout << (unsigned int)desc[i] << " ";
     }
@@ -1283,6 +1308,8 @@ void AKAZE::MLDB_Fill_Values(float* values, int sample_step, int level,
           nsamples++;
         }
       }
+
+      //std::cout << "norm factor cpu sample_step: " << sample_step << ", i: " << i << ", j: " << j << ", factor: " << nsamples << "\n";
 
       di;// /= nsamples;
       dx;// /= nsamples;
@@ -1361,7 +1388,6 @@ void AKAZE::MLDB_Binary_Comparisons(float* values, unsigned char* desc,
       float ival = values[nr_channels * i + pos];
       for (int j = i + 1; j < count; j++) {
         int res = ival > values[nr_channels * j + pos];
-        //int res = 0 > values[nr_channels * j + pos];
         desc[dpos >> 3] |= (res << (dpos & 7));
         dpos++;
       }

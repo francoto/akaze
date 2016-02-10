@@ -107,7 +107,7 @@ struct AKAZEOptions {
     verbosity = false;
 
     ncudaimages = 4;
-    maxkeypoints = 4000;
+    maxkeypoints = 6000;
   }
 
   int omin;                       ///< Initial octave level (-1 means that the size of the input image is duplicated)

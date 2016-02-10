@@ -16,8 +16,42 @@
 #define ORIENT_S (13 * 16)
 #define EXTRACT_S 64
 
+static const float atan2_p1 = 0.9997878412794807f*(float)(180/CV_PI);
+static const float atan2_p3 = -0.3258083974640975f*(float)(180/CV_PI);
+static const float atan2_p5 = 0.1555786518463281f*(float)(180/CV_PI);
+static const float atan2_p7 = -0.04432655554792128f*(float)(180/CV_PI);
+
 __device__ __constant__ float d_Kernel[21];
 __device__ unsigned int d_PointCounter[1];
+
+__device__ __constant__ int comp_idx_1[61*8];
+__device__ __constant__ int comp_idx_2[61*8];
+
+__device__ __constant__ float norm_factors[29];
+
+__device__ float fastAtan2( float y, float x )
+{
+    float ax = std::abs(x), ay = std::abs(y);
+    float a, c, c2;
+    if( ax >= ay )
+    {
+        c = ay/(ax + (float)DBL_EPSILON);
+        c2 = c*c;
+        a = (((atan2_p7*c2 + atan2_p5)*c2 + atan2_p3)*c2 + atan2_p1)*c;
+    }
+    else
+    {
+        c = ax/(ay + (float)DBL_EPSILON);
+        c2 = c*c;
+        a = 90.f - (((atan2_p7*c2 + atan2_p5)*c2 + atan2_p3)*c2 + atan2_p1)*c;
+    }
+    if( x < 0 )
+        a = 180.f - a;
+    if( y < 0 )
+        a = 360.f - a;
+    return a;
+}
+
 
 template <int RADIUS>
 __global__ void ConvRowGPU(float *d_Result, float *d_Data, int width, int pitch,
@@ -732,6 +766,7 @@ void ClearPoints() {
 int GetPoints(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts) {
   int numPts = 0;
   safeCall(cudaMemcpyFromSymbolAsync(&numPts, d_PointCounter, sizeof(int)));
+  std::cout << "number of points: " << numPts << std::endl;
   h_pts.resize(numPts);
   safeCall(cudaMemcpy((float *)&h_pts[0], d_pts, sizeof(cv::KeyPoint) * numPts,
                       cudaMemcpyDeviceToHost));
@@ -742,7 +777,7 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
                                    float *_vals, int size2, int size3,
                                    int size4) {
 
-    __shared__ float acc_vals[3*30*EXTRACT_S];
+  __shared__ float acc_vals[3*30*EXTRACT_S];
 
   float *acc_vals_im = &acc_vals[0];
   float *acc_vals_dx = &acc_vals[30*EXTRACT_S];
@@ -767,9 +802,9 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
   int pitch = d_imgs[4 * lev + 0].pitch;
   int winsize = max(3 * size3, 4 * size4);
 
-  __shared__ int norm2[1];
-  __shared__ int norm3[1];
-  __shared__ int norm4[1];
+  __shared__ int norm2[29];
+  __shared__ int norm3[29];
+  __shared__ int norm4[29];
 
   norm2[0] = 0;
   norm3[0] = 0;
@@ -781,8 +816,7 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
     acc_vals_dy[i * EXTRACT_S + tx] = 0.f;
   }
 
-  __syncthreads();
-
+   __syncthreads();
 
 
   for (int i = tx; i < winsize * winsize; i += EXTRACT_S) {
@@ -809,9 +843,6 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
       acc_vals[3*(y2 * 2 + x2) + 3*30 * tx] += im;
       acc_vals[3*(y2 * 2 + x2) + 3*30 * tx+1] += rx;
       acc_vals[3*(y2 * 2 + x2) + 3*30 * tx+2] += ry;
-//      acc_vals_im[(y2 * 2 + x2) + 30 * tx] += im;
-//      acc_vals_dx[(y2 * 2 + x2) + 30 * tx] += rx;
-//      acc_vals_dy[(y2 * 2 + x2) + 30 * tx] += ry;
     }
     if (m < 3 * size3) {
       int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
@@ -821,9 +852,6 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
       acc_vals[3*(4 + y3 * 3 + x3) + 3*30 * tx] += im;
       acc_vals[3*(4 + y3 * 3 + x3) + 3*30 * tx+1] += rx;
       acc_vals[3*(4 + y3 * 3 + x3) + 3*30 * tx+2] += ry;
-//      acc_vals_im[(4 + y3 * 3 + x3) + 30 * tx] += im;
-//      acc_vals_dx[(4 + y3 * 3 + x3) + 30 * tx] += rx;
-//      acc_vals_dy[(4 + y3 * 3 + x3) + 30 * tx] += ry;
     }
     if (m < 4 * size4) {
       int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
@@ -833,9 +861,6 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
       acc_vals[3*(4 + 9 + y4 * 4 + x4) + 3*30 * tx] += im;
       acc_vals[3*(4 + 9 + y4 * 4 + x4) + 3*30 * tx+1] += rx;
       acc_vals[3*(4 + 9 + y4 * 4 + x4) + 3*30 * tx+2] += ry;
-//      acc_vals_im[(4 + 9 + y4 * 4 + x4) + 30 * tx] += im;
-//      acc_vals_dx[(4 + 9 + y4 * 4 + x4) + 30 * tx] += rx;
-//      acc_vals_dy[(4 + 9 + y4 * 4 + x4) + 30 * tx] += ry;
     }
   }
 
@@ -891,205 +916,42 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
 
 }
 
-__global__ void ExtractDescriptorsSerial(cv::KeyPoint *d_pts, CudaImage *d_imgs,
-                                         float *_vals, int size2, int size3,
-                                         int size4) {
-  __shared__ float acc_vals_im[29 * 1];
-  __shared__ float acc_vals_dx[29 * 1];
-  __shared__ float acc_vals_dy[29 * 1];
 
-  int p = blockIdx.x;
-
-  float *vals = &_vals[p * 3 * 29];
-
-  float iratio = 1.0f / (1 << d_pts[p].octave);
-  int scale = (int)(0.5f * d_pts[p].size * iratio + 0.5f);
-  float xf = d_pts[p].pt.x * iratio;
-  float yf = d_pts[p].pt.y * iratio;
-  float ang = d_pts[p].angle;
-  float co = cos(ang);
-  float si = sin(ang);
-  int tx = threadIdx.x;
-  int lev = d_pts[p].class_id;
-  float *imd = d_imgs[4 * lev + 0].d_data;
-  float *dxd = d_imgs[4 * lev + 2].d_data;
-  float *dyd = d_imgs[4 * lev + 3].d_data;
-  int pitch = d_imgs[4 * lev + 0].pitch;
-  int winsize = max(3 * size3, 4 * size4);
-
-  for (int i = 0; i < 29; ++i) {
-    acc_vals_im[i] = 0;
-    acc_vals_dx[i] = 0;
-    acc_vals_dy[i] = 0;
-  }
-
-  float norm2 = 0;
-  float norm3 = 0;
-  float norm4 = 0;
-
-  for (int i = tx; i < winsize * winsize; i += 1) {
-    int y = i / winsize;
-    int x = i - winsize * y;
-    int m = max(x, y);
-    if (m >= winsize) continue;
-    int l = x - size2;
-    int k = y - size2;
-    int xp = (int)(xf + scale * (k * co - l * si) + 0.5f);
-    int yp = (int)(yf + scale * (k * si + l * co) + 0.5f);
-    int pos = yp * pitch + xp;
-    float im = imd[pos];
-    float dx = dxd[pos];
-    float dy = dyd[pos];
-    float rx = -dx * si + dy * co;
-    float ry = dx * co + dy * si;
-
-    if (m < 2 * size2) {
-      int x2 = (x < size2 ? 0 : 1);
-      int y2 = (y < size2 ? 0 : 1);
-      norm2 += (x < size2 && y < size2 ? 1 : 0);
-      // Add 2x2
-      acc_vals_im[y2 * 2 + x2] += im;
-      acc_vals_dx[y2 * 2 + x2] += rx;
-      acc_vals_dy[y2 * 2 + x2] += ry;
-    }
-    if (m < 3 * size3) {
-      int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
-      int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
-      norm3 += (x < size3 && y < size3 ? 1 : 0);
-      // Add 3x3
-      acc_vals_im[4 + y3 * 3 + x3] += im;
-      acc_vals_dx[4 + y3 * 3 + x3] += rx;
-      acc_vals_dy[4 + y3 * 3 + x3] += ry;
-    }
-    if (m < 4 * size4) {
-      int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
-      int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
-      norm4 += (x < size4 && y < size4 ? 1 : 0);
-      // Add 4x4
-      acc_vals_im[4 + 9 + y4 * 4 + x4] += im;
-      acc_vals_dx[4 + 9 + y4 * 4 + x4] += rx;
-      acc_vals_dy[4 + 9 + y4 * 4 + x4] += ry;
-    }
-  }
-
-  __syncthreads();
-
-  for (int i = 0; i < 4; ++i) {
-    vals[3 * i] = acc_vals_im[i] / norm2;
-    vals[3 * i + 1] = acc_vals_dx[i] / norm2;
-    vals[3 * i + 2] = acc_vals_dy[i] / norm2;
-  }
-  for (int i = 0; i < 9; ++i) {
-    vals[12 + 3 * i] = acc_vals_im[i + 4] / norm3;
-    vals[12 + 3 * i + 1] = acc_vals_dx[i + 4] / norm3;
-    vals[12 + 3 * i + 2] = acc_vals_dy[i + 4] / norm3;
-  }
-  for (int i = 0; i < 16; ++i) {
-    vals[39 + 3 * i] = acc_vals_im[i + 13] / norm4;
-    vals[39 + 3 * i + 1] = acc_vals_dx[i + 13] / norm4;
-    vals[39 + 3 * i + 2] = acc_vals_dy[i + 13] / norm4;
-  }
-}
 
 __global__ void BuildDescriptor(float *_valsim, unsigned char *_desc) {
-  int p = blockIdx.x;
+    int p = blockIdx.x;
 
-  float *valsim = &_valsim[3 * 29 * p];
+    size_t idx = threadIdx.x;
 
-  __shared__ unsigned char desc_s[64];
+    if( idx < 61 ) {
+        float *valsim = &_valsim[3 * 29 * p];
 
-  unsigned char *desc = &_desc[61 * p];
+        unsigned char *desc = &_desc[61 * p];
 
-  for (int i = 0; i < 64; ++i) {
-    (desc_s)[i] = 0;
-  }
 
-  __syncthreads();
+        unsigned char desc_r = 0;
 
-  // 2x2
-  int cntr = 0;
-  for (int j = 0; j < 4; ++j) {
-    for (int i = j + 1; i < 4; ++i) {
-      unsigned char im = valsim[3 * j] > valsim[3 * i] ? 1 : 0;
-      desc_s[cntr >> 3] |= im << (cntr & 7);
-      cntr++;
+#pragma unroll
+        for( int i=0; i<(idx==60 ? 6 : 8); ++i) {
+            int idx1 = comp_idx_1[idx*8+i];
+            int idx2 = comp_idx_2[idx*8+i];
+            desc_r |= (valsim[idx1] > valsim[idx2] ? 1 : 0) << i;
+        }
+
+        desc[idx] = desc_r;
     }
-  }
-  for (int j = 0; j < 3; ++j) {
-    for (int i = j + 1; i < 4; ++i) {
-      unsigned char x = valsim[3 * j + 1] > valsim[3 * i + 1] ? 1 : 0;
-      desc_s[cntr >> 3] |= x << (cntr & 7);
-      cntr++;
-    }
-  }
-  for (int j = 0; j < 3; ++j) {
-    for (int i = j + 1; i < 4; ++i) {
-      unsigned char y = valsim[3 * j + 2] > valsim[3 * i + 2] ? 1 : 0;
-      desc_s[cntr >> 3] |= y << (cntr & 7);
-      cntr++;
-    }
-  }
 
-  // 3x3
-  for (int j = 4; j < 12; ++j) {
-    for (int i = j + 1; i < 13; ++i) {
-      unsigned char im = valsim[3 * j] > valsim[3 * i] ? 1 : 0;
-      desc_s[cntr >> 3] |= im << (cntr & 7);
-      cntr++;
-    }
-  }
-  for (int j = 4; j < 12; ++j) {
-    for (int i = j + 1; i < 13; ++i) {
-      unsigned char x = valsim[3 * j + 1] > valsim[3 * i + 1] ? 1 : 0;
-      desc_s[cntr >> 3] |= x << (cntr & 7);
-      cntr++;
-    }
-  }
-  for (int j = 4; j < 12; ++j) {
-    for (int i = j + 1; i < 13; ++i) {
-      unsigned char y = valsim[3 * j + 2] > valsim[3 * i + 2] ? 1 : 0;
-      desc_s[cntr >> 3] |= y << (cntr & 7);
-      cntr++;
-    }
-  }
-
-  // 4x4
-  for (int j = 13; j < 28; ++j) {
-    for (int i = j + 1; i < 29; ++i) {
-      unsigned char im = valsim[3 * j] > valsim[3 * i] ? 1 : 0;
-      desc_s[cntr >> 3] |= im << (cntr & 7);
-      cntr++;
-    }
-  }
-  for (int j = 13; j < 28; ++j) {
-    for (int i = j + 1; i < 29; ++i) {
-      unsigned char x = valsim[3 * j + 1] > valsim[3 * i + 1] ? 1 : 0;
-      desc_s[cntr >> 3] |= x << (cntr & 7);
-      cntr++;
-    }
-  }
-  for (int j = 13; j < 28; ++j) {
-    for (int i = j + 1; i < 29; ++i) {
-      unsigned char y = valsim[3 * j + 2] > valsim[3 * i + 2] ? 1 : 0;
-      desc_s[cntr >> 3] |= y << (cntr & 7);
-      cntr++;
-    }
-  }
-
-  __syncthreads();
-
-  for (int i = 0; i < 61; ++i) {
-    (desc)[i] = (desc_s)[i];
-  }
 }
 
 double ExtractDescriptors(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts,
                           std::vector<CudaImage> &h_imgs, CudaImage *d_imgs,
                           unsigned char *desc_h, int patsize) {
   int size2 = patsize;
-  int size3 = (int)(2.0f * patsize / 3.0f + 0.5f);
-  int size4 = (int)(0.5f * patsize + 0.5f);
+  int size3 = ceil(2.0f * patsize / 3.0f);
+  int size4 = ceil(0.5f * patsize);
   int numPts = h_pts.size();
+
+  std::cout << "input num points " << h_pts.size() << std::endl;
   // TimerGPU timer0(0);
   dim3 blocks(numPts);
   dim3 threads(EXTRACT_S);
@@ -1100,57 +962,151 @@ double ExtractDescriptors(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts,
 
   ExtractDescriptors << <blocks, threads>>>
       (d_pts, d_imgs, vals_d, size2, size3, size4);
-  // ExtractDescriptorsSerial << <blocks, 1>>>
-  //    (d_pts, d_imgs, vals_d, size2, size3, size4);
+
+#ifdef PRINT_KPT
   cudaMemcpy(vals_h, vals_d, 3 * 29 * numPts * sizeof(float),
              cudaMemcpyDeviceToHost);
 
-  int idx = 0;
-  for (; idx < h_pts.size(); ++idx) {
-    if ((int)h_pts[idx].pt.x == 840 && (int)h_pts[idx].pt.y == 45) break;
+  int idx = - 1;
+  for (int i = 0; i < h_pts.size(); ++i) {
+    if ((int)h_pts[i].pt.x == 865 && (int)h_pts[i].pt.y == 30)
+        idx = i;
+
   }
+#endif
+
+  static int comp_idx_1_h[61*8];
+  static int comp_idx_2_h[61*8];
+
+  int cntr = 0;
+  for (int j = 0; j < 4; ++j) {
+    for (int i = j + 1; i < 4; ++i) {
+        comp_idx_1_h[cntr] = 3*j;
+        comp_idx_2_h[cntr] = 3*i;
+        cntr++;
+    }
+  }
+  for (int j = 0; j < 3; ++j) {
+    for (int i = j + 1; i < 4; ++i) {
+        comp_idx_1_h[cntr] = 3*j+1;
+        comp_idx_2_h[cntr] = 3*i+1;
+        cntr++;
+    }
+  }
+  for (int j = 0; j < 3; ++j) {
+    for (int i = j + 1; i < 4; ++i) {
+        comp_idx_1_h[cntr] = 3*j+2;
+        comp_idx_2_h[cntr] = 3*i+2;
+        cntr++;
+    }
+  }
+
+  // 3x3
+  for (int j = 4; j < 12; ++j) {
+    for (int i = j + 1; i < 13; ++i) {
+        comp_idx_1_h[cntr] = 3*j;
+        comp_idx_2_h[cntr] = 3*i;
+        cntr++;
+    }
+  }
+  for (int j = 4; j < 12; ++j) {
+    for (int i = j + 1; i < 13; ++i) {
+        comp_idx_1_h[cntr] = 3*j+1;
+        comp_idx_2_h[cntr] = 3*i+1;
+        cntr++;
+    }
+  }
+  for (int j = 4; j < 12; ++j) {
+    for (int i = j + 1; i < 13; ++i) {
+        comp_idx_1_h[cntr] = 3*j+2;
+        comp_idx_2_h[cntr] = 3*i+2;
+        cntr++;
+    }
+  }
+
+  // 4x4
+  for (int j = 13; j < 28; ++j) {
+    for (int i = j + 1; i < 29; ++i) {
+        comp_idx_1_h[cntr] = 3*j;
+        comp_idx_2_h[cntr] = 3*i;
+        cntr++;
+    }
+  }
+  for (int j = 13; j < 28; ++j) {
+    for (int i = j + 1; i < 29; ++i) {
+        comp_idx_1_h[cntr] = 3*j+1;
+        comp_idx_2_h[cntr] = 3*i+1;
+        cntr++;
+    }
+  }
+  for (int j = 13; j < 28; ++j) {
+    for (int i = j + 1; i < 29; ++i) {
+        comp_idx_1_h[cntr] = 3*j+2;
+        comp_idx_2_h[cntr] = 3*i+2;
+        cntr++;
+    }
+  }
+
+  cudaMemcpyToSymbolAsync(comp_idx_1,comp_idx_1_h,8*61*sizeof(int));
+  cudaMemcpyToSymbolAsync(comp_idx_2,comp_idx_2_h,8*61*sizeof(int));
 
   unsigned char *desc_d;
   cudaMalloc(&desc_d, numPts * 61);
   cudaMemsetAsync(desc_d, 0, numPts * 61);
-  BuildDescriptor << <blocks, 1>>> (vals_d, desc_d);
+  BuildDescriptor << <blocks, 64>>> (vals_d, desc_d);
+
   cudaMemcpy(desc_h, desc_d, 61 * numPts, cudaMemcpyDeviceToHost);
 
-  float sum2 = 0, sum3 = 0, sum4 = 0;
-  for (int i = 0; i < 4; ++i) {
-    sum2 += vals_h[3 * 29 * idx + 3 * i];
-  }
-  for (int i = 0; i < 9; ++i) {
-    sum3 += vals_h[3 * 29 * idx + 12 + 3 * i];
-  }
-  for (int i = 0; i < 16; ++i) {
-    sum4 += vals_h[3 * 29 * idx + 39 + 3 * i];
-  }
+#ifdef PRINT_KPT
+  if(idx == -1)
+      std::cout << "GPU error:: keypoint not found! " << std::endl;
+  else
+  {
 
-  std::cout << "sums: " << sum2 << " " << sum3 << " " << sum4 << std::endl;
+      float sum2 = 0, sum3 = 0, sum4 = 0;
+      for (int i = 0; i < 4; ++i) {
+        sum2 += vals_h[3 * 29 * idx + 3 * i];
+      }
+      for (int i = 0; i < 9; ++i) {
+        sum3 += vals_h[3 * 29 * idx + 12 + 3 * i];
+      }
+      for (int i = 0; i < 16; ++i) {
+        sum4 += vals_h[3 * 29 * idx + 39 + 3 * i];
+      }
 
-  std::cout << "Keypoint idx: " << idx << std::endl;
+      std::cout << "sums: " << sum2 << " " << sum3 << " " << sum4 << std::endl;
 
-  std::cout << "GPU output:\n";
-  for (int i = 0; i < 12; ++i) {
-    std::cout << vals_h[3 * 29 * idx + i] << " ";
+      std::cout << "Keypoint idx: " << idx << std::endl;
+
+      std::cout << "GPU output:\n";
+      std::cout << "2x2\n";
+      for (int i = 0; i < 12; ++i) {
+        std::cout << vals_h[3 * 29 * idx + i] << " ";
+      }
+      std::cout << std::endl;
+      std::cout << "3x3";
+      std::cout << std::endl;
+      for (int i = 12; i < 39; ++i) {
+        std::cout << vals_h[3 * 29 * idx + i] << " ";
+      }
+      std::cout << std::endl;
+      std::cout << "4x4";
+      std::cout << std::endl;
+      for (int i = 39; i < 3*29; ++i) {
+        std::cout << vals_h[3 * 29 * idx + i] << " ";
+      }
+      std::cout << std::endl;
+      std::cout << "descriptor\n";
+      std::cout << std::endl;
+      for (int i = 0; i < 61; ++i) {
+        std::cout << (unsigned int)desc_h[idx * 61 + i] << " ";
+      }
+      std::cout << "\n";
   }
-  std::cout << std::endl;
-  for (int i = 12; i < 39; ++i) {
-    std::cout << vals_h[3 * 29 * idx + i] << " ";
-  }
-  std::cout << std::endl;
-  for (int i = 39; i < 3*29; ++i) {
-    std::cout << vals_h[3 * 29 * idx + i] << " ";
-  }
-  std::cout << std::endl;
-  for (int i = 0; i < 61; ++i) {
-    std::cout << (unsigned int)desc_h[idx * 61 + i] << " ";
-  }
-  std::cout << "\n";
+#endif
 
   ////checkMsg("ExtractDescriptors() execution failed\n");
-  // safeCall(cudaThreadSynchronize());
+  //safeCall(cudaThreadSynchronize());
   double gpuTime = 0;  // timer0.read();
 #ifdef VERBOSE
   printf("ExtractDescriptors time =     %.2f ms\n", gpuTime);
