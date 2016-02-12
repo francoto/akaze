@@ -802,13 +802,6 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
   int pitch = d_imgs[4 * lev + 0].pitch;
   int winsize = max(3 * size3, 4 * size4);
 
-  __shared__ int norm2[29];
-  __shared__ int norm3[29];
-  __shared__ int norm4[29];
-
-  norm2[0] = 0;
-  norm3[0] = 0;
-  norm4[0] = 0;
 
   for (int i = 0; i < 30; ++i) {
     acc_vals_im[i * EXTRACT_S + tx] = 0.f;
@@ -868,15 +861,402 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
 
   // Reduce stuff
 #pragma unroll
+  float acc_reg;
+  for (int i = 0; i < 15; ++i) {
+      // 0..31 takes care of even accs, 32..63 takes care of odd accs
+      int offset = 2*i + (tx < 32 ? 0 : 1);
+      int tx_d = tx < 32 ? tx : tx-32;
+      for( int d=0; d<90; d+=30) {
+          if( tx_d < 32 ) {
+              acc_reg =  acc_vals[3*30 * tx_d + offset+d] + acc_vals[3*30 * (tx_d + 32) + offset+d];
+              acc_reg += __shfl_down(acc_reg,1);
+              acc_reg += __shfl_down(acc_reg,2);
+              acc_reg += __shfl_down(acc_reg,4);
+              acc_reg += __shfl_down(acc_reg,8);
+              acc_reg += __shfl_down(acc_reg,16);
+          }
+          if(tx_d == 0) {
+              acc_vals[offset+d] = acc_reg;
+          }
+      }
+  }
+
+  __syncthreads();
+
+  // Have 29*3 values to store
+  // They are in acc_vals[0..28,64*30..64*30+28,64*60..64*60+28]
+  if(tx < 29) {
+      vals[tx] = acc_vals[tx];
+      vals[29+tx] = acc_vals[29+tx];
+      vals[2*29+tx] = acc_vals[2*29+tx];
+  }
+
+}
+
+
+
+
+__global__ void ExtractDescriptors_serial(cv::KeyPoint *d_pts, CudaImage *d_imgs,
+                                         float *_vals, int size2, int size3,
+                                         int size4) {
+
+  __shared__ float acc_vals[30*EXTRACT_S];
+  __shared__ float final_vals[3*30];
+
+  int p = blockIdx.x;
+
+  float *vals = &_vals[p * 3 * 29];
+
+  float iratio = 1.0f / (1 << d_pts[p].octave);
+  int scale = (int)(0.5f * d_pts[p].size * iratio + 0.5f);
+  float xf = d_pts[p].pt.x * iratio;
+  float yf = d_pts[p].pt.y * iratio;
+  float ang = d_pts[p].angle;
+  float co = cos(ang);
+  float si = sin(ang);
+  int tx = threadIdx.x;
+  int lev = d_pts[p].class_id;
+  float *imd = d_imgs[4 * lev + 0].d_data;
+  float *dxd = d_imgs[4 * lev + 2].d_data;
+  float *dyd = d_imgs[4 * lev + 3].d_data;
+  int pitch = d_imgs[4 * lev + 0].pitch;
+  int winsize = max(3 * size3, 4 * size4);
+
+
+
+  // IM
+  for (int i = 0; i < 30; ++i) {
+    acc_vals[i * EXTRACT_S + tx] = 0.f;
+  }
+
+   __syncthreads();
+
+
+   for (int i = tx; i < winsize * winsize; i += EXTRACT_S) {
+     int y = i / winsize;
+     int x = i - winsize * y;
+     int m = max(x, y);
+     if (m >= winsize) continue;
+     int l = x - size2;
+     int k = y - size2;
+     int xp = (int)(xf + scale * (k * co - l * si) + 0.5f);
+     int yp = (int)(yf + scale * (k * si + l * co) + 0.5f);
+     int pos = yp * pitch + xp;
+     float im = imd[pos];
+     if (m < 2 * size2) {
+       int x2 = (x < size2 ? 0 : 1);
+       int y2 = (y < size2 ? 0 : 1);
+       //atomicAdd(norm2, (x < size2 && y < size2 ? 1 : 0));
+       // Add 2x2
+       acc_vals[(y2 * 2 + x2) + 30 * tx] += im;
+     }
+     if (m < 3 * size3) {
+       int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
+       int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
+       //atomicAdd(norm3, (x < size3 && y < size3 ? 1 : 0));
+       // Add 3x3
+       acc_vals[(4 + y3 * 3 + x3) + 30 * tx] += im;
+     }
+     if (m < 4 * size4) {
+       int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
+       int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
+       //atomicAdd(norm4, (x < size4 && y < size4 ? 1 : 0));
+       // Add 4x4
+       acc_vals[(4 + 9 + y4 * 4 + x4) + 30 * tx] += im;
+     }
+   }
+
+   __syncthreads();
+
+   // Reduce stuff
+ #pragma unroll
+     for (int i = 0; i < 15; ++i) {
+         // 0..31 takes care of even accs, 32..63 takes care of odd accs
+         int offset = 2*i + (tx < 32 ? 0 : 1);
+         int tx_d = tx < 32 ? tx : tx-32;
+         int acc_idx = 30*tx_d + offset;
+       if (tx_d < 32) {
+         acc_vals[acc_idx] += acc_vals[acc_idx + 30*32];
+       }
+       if (tx_d < 16) {
+         acc_vals[acc_idx] += acc_vals[acc_idx + 30*16];
+       }
+       if (tx_d < 8) {
+         acc_vals[acc_idx] += acc_vals[acc_idx + 30*8];
+       }
+       if (tx_d < 4) {
+         acc_vals[acc_idx] += acc_vals[acc_idx + 30*4];
+       }
+       if (tx_d < 2) {
+         acc_vals[acc_idx] += acc_vals[acc_idx + 30*2];
+       }
+       if (tx_d < 1) {
+         final_vals[3*offset] = acc_vals[acc_idx] + acc_vals[offset+30];
+       }
+     }
+
+
+     // DX
+     for (int i = 0; i < 30; ++i) {
+       acc_vals[i * EXTRACT_S + tx] = 0.f;
+     }
+
+      __syncthreads();
+
+
+      for (int i = tx; i < winsize * winsize; i += EXTRACT_S) {
+        int y = i / winsize;
+        int x = i - winsize * y;
+        int m = max(x, y);
+        if (m >= winsize) continue;
+        int l = x - size2;
+        int k = y - size2;
+        int xp = (int)(xf + scale * (k * co - l * si) + 0.5f);
+        int yp = (int)(yf + scale * (k * si + l * co) + 0.5f);
+        int pos = yp * pitch + xp;
+        float dx = dxd[pos];
+        float dy = dyd[pos];
+        float rx = -dx * si + dy * co;
+        if (m < 2 * size2) {
+          int x2 = (x < size2 ? 0 : 1);
+          int y2 = (y < size2 ? 0 : 1);
+          //atomicAdd(norm2, (x < size2 && y < size2 ? 1 : 0));
+          // Add 2x2
+          acc_vals[(y2 * 2 + x2) + 30 * tx] += rx;
+        }
+        if (m < 3 * size3) {
+          int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
+          int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
+          //atomicAdd(norm3, (x < size3 && y < size3 ? 1 : 0));
+          // Add 3x3
+          acc_vals[(4 + y3 * 3 + x3) + 30 * tx] += rx;
+        }
+        if (m < 4 * size4) {
+          int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
+          int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
+          //atomicAdd(norm4, (x < size4 && y < size4 ? 1 : 0));
+          // Add 4x4
+          acc_vals[(4 + 9 + y4 * 4 + x4) + 30 * tx] += rx;
+        }
+      }
+
+      __syncthreads();
+
+      // Reduce stuff
+    #pragma unroll
+      for (int i = 0; i < 15; ++i) {
+          // 0..31 takes care of even accs, 32..63 takes care of odd accs
+          int offset = 2*i + (tx < 32 ? 0 : 1);
+          int tx_d = tx < 32 ? tx : tx-32;
+          int acc_idx = 30*tx_d + offset;
+        if (tx_d < 32) {
+          acc_vals[acc_idx] += acc_vals[acc_idx + 30*32];
+        }
+        if (tx_d < 16) {
+          acc_vals[acc_idx] += acc_vals[acc_idx + 30*16];
+        }
+        if (tx_d < 8) {
+          acc_vals[acc_idx] += acc_vals[acc_idx + 30*8];
+        }
+        if (tx_d < 4) {
+          acc_vals[acc_idx] += acc_vals[acc_idx + 30*4];
+        }
+        if (tx_d < 2) {
+          acc_vals[acc_idx] += acc_vals[acc_idx + 30*2];
+        }
+        if (tx_d < 1) {
+          final_vals[3*offset] = acc_vals[acc_idx] + acc_vals[offset+30];
+        }
+      }
+
+
+        // DY
+        for (int i = 0; i < 30; ++i) {
+          acc_vals[i * EXTRACT_S + tx] = 0.f;
+        }
+
+         __syncthreads();
+
+
+         for (int i = tx; i < winsize * winsize; i += EXTRACT_S) {
+           int y = i / winsize;
+           int x = i - winsize * y;
+           int m = max(x, y);
+           if (m >= winsize) continue;
+           int l = x - size2;
+           int k = y - size2;
+           int xp = (int)(xf + scale * (k * co - l * si) + 0.5f);
+           int yp = (int)(yf + scale * (k * si + l * co) + 0.5f);
+           int pos = yp * pitch + xp;
+           float dx = dxd[pos];
+           float dy = dyd[pos];
+           float ry = dx * co + dy * si;
+           if (m < 2 * size2) {
+             int x2 = (x < size2 ? 0 : 1);
+             int y2 = (y < size2 ? 0 : 1);
+             //atomicAdd(norm2, (x < size2 && y < size2 ? 1 : 0));
+             // Add 2x2
+             acc_vals[(y2 * 2 + x2) + 30 * tx] += ry;
+           }
+           if (m < 3 * size3) {
+             int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
+             int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
+             //atomicAdd(norm3, (x < size3 && y < size3 ? 1 : 0));
+             // Add 3x3
+             acc_vals[(4 + y3 * 3 + x3) + 30 * tx] += ry;
+           }
+           if (m < 4 * size4) {
+             int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
+             int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
+             //atomicAdd(norm4, (x < size4 && y < size4 ? 1 : 0));
+             // Add 4x4
+             acc_vals[(4 + 9 + y4 * 4 + x4) + 30 * tx] += ry;
+           }
+         }
+
+         __syncthreads();
+
+         // Reduce stuff
+       #pragma unroll
+         for (int i = 0; i < 15; ++i) {
+             // 0..31 takes care of even accs, 32..63 takes care of odd accs
+             int offset = 2*i + (tx < 32 ? 0 : 1);
+             int tx_d = tx < 32 ? tx : tx-32;
+             int acc_idx = 30*tx_d + offset;
+           if (tx_d < 32) {
+             acc_vals[acc_idx] += acc_vals[acc_idx + 30*32];
+           }
+           if (tx_d < 16) {
+             acc_vals[acc_idx] += acc_vals[acc_idx + 30*16];
+           }
+           if (tx_d < 8) {
+             acc_vals[acc_idx] += acc_vals[acc_idx + 30*8];
+           }
+           if (tx_d < 4) {
+             acc_vals[acc_idx] += acc_vals[acc_idx + 30*4];
+           }
+           if (tx_d < 2) {
+             acc_vals[acc_idx] += acc_vals[acc_idx + 30*2];
+           }
+           if (tx_d < 1) {
+             final_vals[3*offset] = acc_vals[acc_idx] + acc_vals[offset+30];
+           }
+         }
+
+           __syncthreads();
+
+
+    // Have 29*3 values to store
+    // They are in acc_vals[0..28,64*30..64*30+28,64*60..64*60+28]
+    if(tx < 29) {
+        vals[tx] = final_vals[tx];
+        vals[29+tx] = final_vals[29+tx];
+        vals[2*29+tx] = final_vals[2*29+tx];
+    }
+
+}
+
+
+
+
+__global__ void ExtractDescriptors_atomic_shared(cv::KeyPoint *d_pts, CudaImage *d_imgs,
+                                   float *_vals, int size2, int size3,
+                                   int size4) {
+
+  __shared__ float acc_vals[3*30*EXTRACT_S/2];
+
+  float *acc_vals_im = &acc_vals[0];
+  float *acc_vals_dx = &acc_vals[30*EXTRACT_S/2];
+  float *acc_vals_dy = &acc_vals[2*30*EXTRACT_S/2];
+
+  int p = blockIdx.x;
+
+  float *vals = &_vals[p * 3 * 29];
+
+  float iratio = 1.0f / (1 << d_pts[p].octave);
+  int scale = (int)(0.5f * d_pts[p].size * iratio + 0.5f);
+  float xf = d_pts[p].pt.x * iratio;
+  float yf = d_pts[p].pt.y * iratio;
+  float ang = d_pts[p].angle;
+  float co = cos(ang);
+  float si = sin(ang);
+  int tx = threadIdx.x;
+  int lev = d_pts[p].class_id;
+  float *imd = d_imgs[4 * lev + 0].d_data;
+  float *dxd = d_imgs[4 * lev + 2].d_data;
+  float *dyd = d_imgs[4 * lev + 3].d_data;
+  int pitch = d_imgs[4 * lev + 0].pitch;
+  int winsize = max(3 * size3, 4 * size4);
+
+
+  for (int i = 0; i < 15; ++i) {
+    acc_vals_im[i * EXTRACT_S + tx] = 0.f;
+    acc_vals_dx[i * EXTRACT_S + tx] = 0.f;
+    acc_vals_dy[i * EXTRACT_S + tx] = 0.f;
+  }
+
+   __syncthreads();
+
+
+  for (int i = tx; i < winsize * winsize; i += EXTRACT_S) {
+    int y = i / winsize;
+    int x = i - winsize * y;
+    int m = max(x, y);
+    if (m >= winsize) continue;
+    int l = x - size2;
+    int k = y - size2;
+    int xp = (int)(xf + scale * (k * co - l * si) + 0.5f);
+    int yp = (int)(yf + scale * (k * si + l * co) + 0.5f);
+    int pos = yp * pitch + xp;
+    float im = imd[pos];
+    float dx = dxd[pos];
+    float dy = dyd[pos];
+    float rx = -dx * si + dy * co;
+    float ry = dx * co + dy * si;
+
+    int tx_d = tx & (EXTRACT_S>>1-1);
+    if (m < 2 * size2) {
+      int x2 = (x < size2 ? 0 : 1);
+      int y2 = (y < size2 ? 0 : 1);
+      //atomicAdd(norm2, (x < size2 && y < size2 ? 1 : 0));
+      // Add 2x2
+      atomicAdd(&acc_vals[3*(y2 * 2 + x2) + 3*30 * tx_d] , im);
+      atomicAdd(&acc_vals[3*(y2 * 2 + x2) + 3*30 * tx_d+1] , rx);
+      atomicAdd(&acc_vals[3*(y2 * 2 + x2) + 3*30 * tx_d+2] , ry);
+    }
+    if (m < 3 * size3) {
+      int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
+      int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
+      //atomicAdd(norm3, (x < size3 && y < size3 ? 1 : 0));
+      // Add 3x3
+      atomicAdd(&acc_vals[3*(4 + y3 * 3 + x3) + 3*30 * tx_d] , im);
+      atomicAdd(&acc_vals[3*(4 + y3 * 3 + x3) + 3*30 * tx_d+1] , rx);
+      atomicAdd(&acc_vals[3*(4 + y3 * 3 + x3) + 3*30 * tx_d+2] , ry);
+    }
+    if (m < 4 * size4) {
+      int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
+      int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
+      //atomicAdd(norm4, (x < size4 && y < size4 ? 1 : 0));
+      // Add 4x4
+      atomicAdd(&acc_vals[3*(4 + 9 + y4 * 4 + x4) + 3*30 * tx_d] , im);
+      atomicAdd(&acc_vals[3*(4 + 9 + y4 * 4 + x4) + 3*30 * tx_d+1] , rx);
+      atomicAdd(&acc_vals[3*(4 + 9 + y4 * 4 + x4) + 3*30 * tx_d+2] , ry);
+    }
+  }
+
+  __syncthreads();
+
+  // Reduce stuff
+#pragma unroll
     for (int i = 0; i < 15; ++i) {
         // 0..31 takes care of even accs, 32..63 takes care of odd accs
         int offset = 2*i + (tx < 32 ? 0 : 1);
         int tx_d = tx < 32 ? tx : tx-32;
-      if (tx_d < 32) {
-        acc_vals[3*30 * tx_d + offset] += acc_vals[3*30 * (tx_d + 32) + offset];
-        acc_vals[3*30 * tx_d + offset+30] += acc_vals[3*30 * (tx_d + 32) + offset+30];
-        acc_vals[3*30 * tx_d + offset+60] += acc_vals[3*30 * (tx_d + 32) + offset+60];
-      }
+      /*if (tx_d < 32) {
+        acc_vals[3*30 * tx_d/2 + offset] += acc_vals[3*30/2 * (tx_d + 32) + offset];
+        acc_vals[3*30 * tx_d/2 + offset+30] += acc_vals[3*30/2 * (tx_d + 32) + offset+30];
+        acc_vals[3*30 * tx_d/2 + offset+60] += acc_vals[3*30/2 * (tx_d + 32) + offset+60];
+      }*/
       if (tx_d < 16) {
         acc_vals[3*30 * tx_d + offset] += acc_vals[3*30 * (tx_d + 16) + offset];
         acc_vals[3*30 * tx_d + offset+30] += acc_vals[3*30 * (tx_d + 16) + offset+30];
@@ -916,6 +1296,100 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
 
 }
 
+__global__ void ExtractDescriptors_atomic(cv::KeyPoint *d_pts, CudaImage *d_imgs,
+                                   float *_vals, int size2, int size3,
+                                   int size4) {
+
+  __shared__ float acc_vals[3*29];
+
+  float *acc_vals_im = &acc_vals[0];
+  float *acc_vals_dx = &acc_vals[29];
+  float *acc_vals_dy = &acc_vals[2*29];
+
+  int p = blockIdx.x;
+
+  float *vals = &_vals[p * 3 * 29];
+
+  float iratio = 1.0f / (1 << d_pts[p].octave);
+  int scale = (int)(0.5f * d_pts[p].size * iratio + 0.5f);
+  float xf = d_pts[p].pt.x * iratio;
+  float yf = d_pts[p].pt.y * iratio;
+  float ang = d_pts[p].angle;
+  float co = cos(ang);
+  float si = sin(ang);
+  int tx = threadIdx.x;
+  int lev = d_pts[p].class_id;
+  float *imd = d_imgs[4 * lev + 0].d_data;
+  float *dxd = d_imgs[4 * lev + 2].d_data;
+  float *dyd = d_imgs[4 * lev + 3].d_data;
+  int pitch = d_imgs[4 * lev + 0].pitch;
+  int winsize = max(3 * size3, 4 * size4);
+
+  if(tx<29) {
+    acc_vals_im[tx] = 0.f;
+    acc_vals_dx[tx] = 0.f;
+    acc_vals_dy[tx] = 0.f;
+  }
+
+   __syncthreads();
+
+
+  for (int i = tx; i < winsize * winsize; i += EXTRACT_S) {
+    int y = i / winsize;
+    int x = i - winsize * y;
+    int m = max(x, y);
+    if (m >= winsize) continue;
+    int l = x - size2;
+    int k = y - size2;
+    int xp = (int)(xf + scale * (k * co - l * si) + 0.5f);
+    int yp = (int)(yf + scale * (k * si + l * co) + 0.5f);
+    int pos = yp * pitch + xp;
+    float im = imd[pos];
+    float dx = dxd[pos];
+    float dy = dyd[pos];
+    float rx = -dx * si + dy * co;
+    float ry = dx * co + dy * si;
+
+    if (m < 2 * size2) {
+      int x2 = (x < size2 ? 0 : 1);
+      int y2 = (y < size2 ? 0 : 1);
+      //atomicAdd(norm2, (x < size2 && y < size2 ? 1 : 0));
+      // Add 2x2
+      atomicAdd(&acc_vals[3*(y2 * 2 + x2)],im);
+      atomicAdd(&acc_vals[3*(y2 * 2 + x2)+1],rx);
+      atomicAdd(&acc_vals[3*(y2 * 2 + x2)+2],ry);
+    }
+    if (m < 3 * size3) {
+      int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
+      int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
+      //atomicAdd(norm3, (x < size3 && y < size3 ? 1 : 0));
+      // Add 3x3
+      atomicAdd(&acc_vals[3*(4 + y3 * 3 + x3)] , im);
+      atomicAdd(&acc_vals[3*(4 + y3 * 3 + x3)+1] , rx);
+      atomicAdd(&acc_vals[3*(4 + y3 * 3 + x3)+2] , ry);
+    }
+    if (m < 4 * size4) {
+      int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
+      int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
+      //atomicAdd(norm4, (x < size4 && y < size4 ? 1 : 0));
+      // Add 4x4
+      atomicAdd(&acc_vals[3*(4 + 9 + y4 * 4 + x4)] , im);
+      atomicAdd(&acc_vals[3*(4 + 9 + y4 * 4 + x4)+1] , rx);
+      atomicAdd(&acc_vals[3*(4 + 9 + y4 * 4 + x4)+2] , ry);
+    }
+  }
+
+    __syncthreads();
+
+    // Have 29*3 values to store
+    // They are in acc_vals[0..28,64*30..64*30+28,64*60..64*60+28]
+    if(tx < 29) {
+        vals[tx] = acc_vals[tx];
+        vals[29+tx] = acc_vals[29+tx];
+        vals[2*29+tx] = acc_vals[2*29+tx];
+    }
+
+}
 
 
 __global__ void BuildDescriptor(float *_valsim, unsigned char *_desc) {
@@ -943,6 +1417,200 @@ __global__ void BuildDescriptor(float *_valsim, unsigned char *_desc) {
 
 }
 
+
+#define NTHREADS_MATCH 256
+__global__ void MatchDescriptors(unsigned char* d1, unsigned char *d2, int pitch, int nkpts_2, cv::DMatch* matches) {
+
+    int p = blockIdx.x;
+
+    int x = threadIdx.x;
+
+    __shared__ int idxBest[NTHREADS_MATCH];
+    __shared__ int idxSecondBest[NTHREADS_MATCH];
+    __shared__ int scoreBest[NTHREADS_MATCH];
+    __shared__ int scoreSecondBest[NTHREADS_MATCH];
+
+    idxBest[x] = 0;
+    idxSecondBest[x] = 0;
+    scoreBest[x] = 512;
+    scoreSecondBest[x] = 512;
+
+    __syncthreads();
+
+//    int idxBest = 1;
+//    int idxSecondBest = 0;
+//    int scoreBest = 512;
+//    int scoreSecondBest = 512;
+
+//    for (int i=0; i<nkpts_2; i+=32) {
+//        if( i+x < nkpts_2) {
+//            // Check d1[p] with d2[i]
+//            int score = 0;
+//            for(int j=0; j<16; ++j) {
+//                score += __popcll(d1[pitch*p+4*j] ^ d2[pitch*(i+x)+4*j]);
+//            }
+//            if( score < scoreBest ) {
+//                scoreSecondBest = scoreBest;
+//                scoreBest = score;
+//                idxSecondBest = idxBest;
+//                idxBest = i+x;
+//            } else if( score < scoreSecondBest ) {
+//                scoreSecondBest = score;
+//                idxSecondBest = i+x;
+//            }
+//        }
+//    }
+
+    for (int i=0; i<nkpts_2; i+=NTHREADS_MATCH) {
+        if( i+x < nkpts_2) {
+            // Check d1[p] with d2[i]
+            int score = 0;
+            for(int j=0; j<16; ++j) {
+                score += __popcll(d1[pitch*p+4*j] ^ d2[pitch*(i+x)+4*j]);
+            }
+            if( score < scoreBest[x] ) {
+                scoreSecondBest[x] = scoreBest[x];
+                scoreBest[x] = score;
+                idxSecondBest[x] = idxBest[x];
+                idxBest[x] = i+x;
+            } else if( score < scoreSecondBest[x] ) {
+                scoreSecondBest[x] = score;
+                idxSecondBest[x] = i+x;
+            }
+        }
+    }
+
+//    for( int i=16; i>=1; i/=2) {
+//        int tBest = __shfl_down(scoreBest,i);
+//        int tIdx = __shfl_down(idxBest,i);
+//        if(tBest < scoreBest) {
+//            scoreSecondBest = scoreBest;
+//            idxSecondBest = idxBest;
+//            scoreBest = tBest;
+//            idxBest = tIdx;
+//        }
+//        tBest = __shfl_down(scoreSecondBest,i);
+//        tIdx = __shfl_down(idxSecondBest,i);
+//        if(tBest < scoreSecondBest) {
+//            scoreSecondBest = tBest;
+//            idxSecondBest = tIdx;
+//        }
+//    }
+
+    __syncthreads();
+
+/*    for( int i=NTHREADS_MATCH/2; i>=1; i/=2) {
+        if(x<i) {
+            if( scoreBest[x+i] < scoreBest[x] ) {
+                scoreSecondBest[x] = scoreBest[x];
+                scoreBest[x] = scoreBest[x+i];
+                idxSecondBest[x] = idxBest[x];
+                idxBest[x] = idxBest[x+i];
+            } else if( scoreBest[x+i] < scoreSecondBest[x] ) {
+                scoreSecondBest[x] = scoreBest[x+i];
+                idxSecondBest[x] = idxBest[x+i];
+            }
+            if(scoreSecondBest[x+i] < scoreSecondBest[x]) {
+                scoreSecondBest[x] = scoreSecondBest[x+i];
+                idxSecondBest[x] = idxSecondBest[x+i];
+            }
+
+        }*/
+        //if(i>16) __syncthreads();
+//        if(x<i) {
+//            if( scoreBest[x+i] < scoreSecondBest[x] ) {
+//                scoreSecondBest[x] = scoreBest[x+i];
+//                idxSecondBest[x] = idxBest[x+i];
+//            } else if (scoreSecondBest[x+i] < scoreSecondBest[x] ) {
+//                scoreSecondBest[x] = scoreSecondBest[x+i];
+//                idxSecondBest[x] = idxSecondBest[x+i];
+//            }
+//        }
+//        if(i>16) __syncthreads();
+    //}
+
+    for(int i=1; i<NTHREADS_MATCH; ++i) {
+        if( scoreBest[i] < scoreBest[0] ) {
+            scoreSecondBest[0] = scoreBest[0];
+            scoreBest[0] = scoreBest[i];
+            idxSecondBest[0] = idxBest[0];
+            idxBest[0] = idxBest[i];
+        } else if( scoreBest[i] < scoreSecondBest[0] ) {
+            scoreSecondBest[0] = scoreBest[i];
+            idxSecondBest[0] = idxBest[i];
+        }
+        if(scoreSecondBest[i] < scoreSecondBest[0]) {
+            scoreSecondBest[0] = scoreSecondBest[i];
+            idxSecondBest[0] = idxSecondBest[i];
+        }
+    }
+
+
+
+//    if(x==0) {
+//        matches[2*p].queryIdx = p;
+//        matches[2*p].trainIdx = idxBest;
+//        matches[2*p].distance = scoreBest;
+//        matches[2*p+1].queryIdx = p;
+//        matches[2*p+1].trainIdx = idxSecondBest;
+//        matches[2*p+1].distance = scoreSecondBest;
+//    }
+
+    if(x==0) {
+        matches[2*p].queryIdx = p;
+        matches[2*p].trainIdx = idxBest[0];
+        matches[2*p].distance = scoreBest[0];
+        matches[2*p+1].queryIdx = p;
+        matches[2*p+1].trainIdx = idxSecondBest[0];
+        matches[2*p+1].distance = scoreSecondBest[0];
+    }
+
+}
+
+
+
+void MatchDescriptors(cv::Mat& desc_query,
+                      cv::Mat& desc_train,
+                      std::vector<std::vector<cv::DMatch> >& dmatches) {
+
+    size_t pitch1, pitch2;
+    unsigned char *descq_d;
+    cudaMallocPitch(&descq_d,&pitch1, 64, desc_query.rows);
+    cudaMemset2D(descq_d, pitch1,0,64,desc_query.rows);
+    cudaMemcpy2D(descq_d, pitch1, desc_query.data, desc_query.cols, desc_query.cols, desc_query.rows, cudaMemcpyHostToDevice);
+    unsigned char *desct_d;
+    cudaMallocPitch(&desct_d,&pitch2, 64, desc_train.rows);
+    cudaMemset2D(desct_d, pitch2,0,64,desc_train.rows);
+    cudaMemcpy2D(desct_d, pitch2, desc_train.data, desc_train.cols, desc_train.cols, desc_train.rows, cudaMemcpyHostToDevice);
+
+    dim3 block(desc_query.rows);
+
+    cv::DMatch* dmatches_d;
+    cudaMalloc(&dmatches_d, desc_query.rows*2*sizeof(cv::DMatch));
+
+    std::cout << "Matching descriptors\n";
+    MatchDescriptors<<<block,NTHREADS_MATCH>>>(descq_d, desct_d, pitch1, desc_train.rows, dmatches_d);
+
+    cv::DMatch* dmatches_h = new cv::DMatch[2*desc_query.rows];
+    cudaMemcpy(dmatches_h, dmatches_d, desc_query.rows*2*sizeof(cv::DMatch), cudaMemcpyDeviceToHost);
+
+    for(int i=0; i<desc_query.rows; ++i) {
+        std::vector<cv::DMatch> tdmatch;
+        tdmatch.push_back(dmatches_h[2*i]);
+        tdmatch.push_back(dmatches_h[2*i+1]);
+        dmatches.push_back(tdmatch);
+    }
+
+    cudaFree(descq_d);
+    cudaFree(desct_d);
+    cudaFree(dmatches_d);
+
+    delete []  dmatches_h;
+}
+
+
+
+
 double ExtractDescriptors(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts,
                           std::vector<CudaImage> &h_imgs, CudaImage *d_imgs,
                           unsigned char *desc_h, int patsize) {
@@ -963,13 +1631,19 @@ double ExtractDescriptors(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts,
   ExtractDescriptors << <blocks, threads>>>
       (d_pts, d_imgs, vals_d, size2, size3, size4);
 
+
+//#define PRINT_KPT
+
 #ifdef PRINT_KPT
   cudaMemcpy(vals_h, vals_d, 3 * 29 * numPts * sizeof(float),
              cudaMemcpyDeviceToHost);
 
+//  int xkpt = 865, ykpt = 30;
+  int xkpt = 840, ykpt = 45;
+
   int idx = - 1;
   for (int i = 0; i < h_pts.size(); ++i) {
-    if ((int)h_pts[i].pt.x == 865 && (int)h_pts[i].pt.y == 30)
+    if ((int)h_pts[i].pt.x == xkpt && (int)h_pts[i].pt.y == ykpt)
         idx = i;
 
   }
@@ -1056,7 +1730,6 @@ double ExtractDescriptors(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts,
   BuildDescriptor << <blocks, 64>>> (vals_d, desc_d);
 
   cudaMemcpy(desc_h, desc_d, 61 * numPts, cudaMemcpyDeviceToHost);
-
 #ifdef PRINT_KPT
   if(idx == -1)
       std::cout << "GPU error:: keypoint not found! " << std::endl;

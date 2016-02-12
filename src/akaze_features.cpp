@@ -107,7 +107,16 @@ int main(int argc, char *argv[]) {
   evolution.Compute_Descriptors(kpts, desc);
   t2 = cv::getTickCount();
   tdesc = 1000.0*(t2-t1) / cv::getTickFrequency();
+
+  std::vector<std::vector<cv::DMatch> > dmatches;
+  MatchDescriptors(desc, desc, dmatches);
+
   cudaProfilerStop();
+  for(int i = 0; i < dmatches.size(); ++i)
+  {
+    std::cout << dmatches[i][0].trainIdx << " " << dmatches[i][0].queryIdx << " " <<  dmatches[i][0].distance << " " << dmatches[i][1].trainIdx << " " << dmatches[i][1].queryIdx << " " <<  dmatches[i][1].distance << std::endl;
+  }
+
   
   if (true) {
 

@@ -639,6 +639,7 @@ void AKAZE::Compute_Descriptors(std::vector<cv::KeyPoint>& kpts,
   unsigned char* desc_h = new unsigned char[kpts.size() * 61];
   ExtractDescriptors(kpts, cuda_points, cuda_buffers, cuda_images, desc_h,
                      pattern_size);
+    memcpy(desc.data, desc_h, kpts.size()*61);
   delete[] desc_h;
 #endif
 
