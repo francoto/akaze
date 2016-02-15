@@ -90,7 +90,7 @@ int main(int argc, char *argv[]) {
 
   // AKAZE variables
   vector<cv::KeyPoint> kpts1_akaze, kpts2_akaze;
-  vector<cv::Point2f> matches_akaze, inliers_akaze;
+  vector<cv::Point2f> matches_akaze, inliers_akaze, cuda_matches_akaze, cuda_inliers;
   vector<vector<cv::DMatch> > dmatches_akaze;
   cv::Mat desc1_akaze, desc2_akaze;
   int nmatches_akaze = 0, ninliers_akaze = 0, noutliers_akaze = 0;
@@ -312,18 +312,41 @@ int main(int argc, char *argv[]) {
   draw_keypoints(img2_rgb_akaze, kpts2_akaze);
   draw_inliers(img1_rgb_akaze, img2_rgb_akaze, img_com_akaze, inliers_akaze, 2);
 
+
+  // AKAZE CUDA RESULTS
+  std::vector<std::vector<cv::DMatch> > cuda_dmatches;
+  MatchDescriptors(desc1_akaze, desc2_akaze, cuda_dmatches);
+
+  matches2points_nndr(kpts1_akaze, kpts2_akaze, cuda_dmatches,
+                      cuda_matches_akaze, DRATIO);
+
+  if (use_ransac == false)
+    compute_inliers_homography(cuda_matches_akaze, cuda_inliers, HG,
+                               MIN_H_ERROR);
+  else
+    compute_inliers_ransac(cuda_matches_akaze, cuda_inliers, MIN_H_ERROR,
+                           false);
+
+  float cuda_nmatches_akaze = cuda_matches_akaze.size() / 2;
+  float cuda_ninliers_akaze = cuda_inliers.size() / 2;
+  float cuda_noutliers_akaze = cuda_nmatches_akaze - cuda_ninliers_akaze;
+  float cuda_ratio_akaze =
+      100.0 * ((float)cuda_ninliers_akaze / (float)cuda_nmatches_akaze);
+
   cout << "A-KAZE Results" << endl;
   cout << "**************************************" << endl;
   cout << "Number of Keypoints Image 1: " << nkpts1_akaze << endl;
   cout << "Number of Keypoints Image 2: " << nkpts2_akaze << endl;
-  cout << "Number of Matches: " << nmatches_akaze << endl;
-  cout << "Number of Inliers: " << ninliers_akaze << endl;
-  cout << "Number of Outliers: " << noutliers_akaze << endl;
-  cout << "Inliers Ratio: " << ratio_akaze << endl;
+  cout << "Number of Matches: " << nmatches_akaze << " cuda "
+       << cuda_nmatches_akaze << endl;
+  cout << "Number of Inliers: " << ninliers_akaze << " cuda "
+       << cuda_ninliers_akaze << endl;
+  cout << "Number of Outliers: " << noutliers_akaze << " cuda "
+       << cuda_noutliers_akaze << endl;
+  cout << "Inliers Ratio: " << ratio_akaze << " cuda " << cuda_ratio_akaze
+       << endl;
   cout << "A-KAZE Features Extraction Time (ms): " << takaze << endl;
-  cout << endl;
-
-  // Show the images with the inliers
+  cout << endl;  // Show the images with the inliers
   cv::imshow("ORB",img_com_orb);
   cv::imshow("BRISK",img_com_brisk);
   cv::imshow("A-KAZE",img_com_akaze);
