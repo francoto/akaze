@@ -306,8 +306,6 @@ __global__ void NLDStep(float *imgd, float *flod, float *temd, int width,
     float ypos = (fb0 + fb[+BW]) * (ib[+BW] - ib0);
     float yneg = (fb0 + fb[-BW]) * (ib0 - ib[-BW]);
     temd[y * pitch + x] = stepsize * (xpos - xneg + ypos - yneg);
-    // s.imgd[y*s.pitch + x] = s.imgd[y*s.pitch+x] + s.stepsize*(xpos-xneg +
-    // ypos-yneg);//temd[y*pitch + x];
   }
 }
 
@@ -363,17 +361,16 @@ double NLDStep(CudaImage &img, CudaImage &flow, CudaImage &temp,
   s.pitch = img.pitch;
   s.height = img.height;
   s.stepsize = 0.5 * stepsize;
-  // NLDStep<<<blocks0, threads0>>>(img.d_data, flow.d_data, temp.d_data,
-  // img.width, img.pitch, img.height, 0.5f*stepsize);
-  NLDStep << <blocks0, threads0>>> (s);
+  NLDStep<<<blocks0, threads0>>>(img.d_data, flow.d_data, temp.d_data,
+                                 img.width, img.pitch, img.height, 0.5f*stepsize);
   // checkMsg("NLDStep() execution failed\n");
   // safeCall(cudaThreadSynchronize());
   dim3 blocks1(iDivUp(img.width, 32), iDivUp(img.height, 16));
   dim3 threads1(32, 16);
-  // NLDUpdate<<<blocks1, threads1>>>(img.d_data, temp.d_data, img.width,
-  // img.pitch, img.height);
-  // checkMsg("NLDUpdate() execution failed\n");
-  // safeCall(cudaThreadSynchronize());
+    NLDUpdate<<<blocks1, threads1>>>(img.d_data, temp.d_data, img.width,
+                                     img.pitch, img.height);
+  //  checkMsg("NLDUpdate() execution failed\n");
+//    safeCall(cudaThreadSynchronize());
   double gpuTime = 0;  // timer0.read();
 #ifdef VERBOSE
   printf("NLDStep time =                %.2f ms\n", gpuTime);
@@ -390,7 +387,32 @@ __global__ void HalfSample(float *iimd, float *oimd, int iwidth, int iheight,
   int y = blockIdx.y * 16 + ty;
   if (x >= owidth || y >= oheight) return;
   float *ptri = iimd + (2 * y) * ipitch + (2 * x);
-  if (2 * owidth == iwidth) {
+    if (2*owidth==iwidth) {
+        buffer[ty*32 + tx] = owidth*(ptri[0] + ptri[1]);
+        ptri += ipitch;
+        buffer[ty*32 + tx + 16] = owidth*(ptri[0] + ptri[1]);
+        if (ty==15) {
+            ptri += ipitch;
+            buffer[tx + 32*16] = owidth*(ptri[0] + ptri[1]);
+        } else if (y*2+3 == iheight) {
+            ptri += ipitch;
+            buffer[tx + 32*(ty+1)] = owidth*(ptri[0] + ptri[1]);
+        }
+    } else {
+        float f0 = owidth - x;
+        float f2 = 1 + x;
+        buffer[ty*32 + tx] = f0*ptri[0] + owidth*ptri[1] + f2*ptri[2];
+        ptri += ipitch;
+        buffer[ty*32 + tx + 16] = f0*ptri[0] + owidth*ptri[1] + f2*ptri[2];
+        if (ty==15 && 2*oheight!=iheight) {
+            ptri += ipitch;
+            buffer[tx + 32*16] = f0*ptri[0] + owidth*ptri[1] + f2*ptri[1];
+        } else if (y*2+3 == iheight && 2*oheight!=iheight) {
+            ptri += ipitch;
+            buffer[tx + 32*(ty+1)] = f0*ptri[0] + owidth*ptri[1] + f2*ptri[2];
+        }
+    }
+/*  if (2 * owidth == iwidth) {
     buffer[ty * 32 + tx] = owidth * (ptri[0] + ptri[1]);
     ptri += ipitch;
     buffer[ty * 32 + tx + 16] = owidth * (ptri[0] + ptri[1]);
@@ -408,7 +430,7 @@ __global__ void HalfSample(float *iimd, float *oimd, int iwidth, int iheight,
       ptri += ipitch;
       buffer[tx + 32 * 16] = f0 * ptri[0] + owidth * ptri[1] + f2 * ptri[1];
     }
-  }
+  }*/
   __syncthreads();
   float *buff = buffer + 32 * ty + tx;
   if (2 * oheight == iheight)
@@ -760,7 +782,6 @@ void ClearPoints() {
 int GetPoints(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts) {
   int numPts = 0;
   safeCall(cudaMemcpyFromSymbolAsync(&numPts, d_PointCounter, sizeof(int)));
-  std::cout << "number of points: " << numPts << std::endl;
   h_pts.resize(numPts);
   safeCall(cudaMemcpy((float *)&h_pts[0], d_pts, sizeof(cv::KeyPoint) * numPts,
                       cudaMemcpyDeviceToHost));
@@ -1586,14 +1607,11 @@ __global__ void MatchDescriptors(unsigned char *d1, unsigned char *d2,
     cudaMemcpy2D(desct_d, pitch2, desc_train.data, desc_train.cols,
                  desc_train.cols, desc_train.rows, cudaMemcpyHostToDevice);
 
-    std::cout << "pich 1" << pitch1 << std::endl;
-
     dim3 block(desc_query.rows);
 
     cv::DMatch *dmatches_d;
     cudaMalloc(&dmatches_d, desc_query.rows * 2 * sizeof(cv::DMatch));
 
-    std::cout << "Matching descriptors\n";
     MatchDescriptors << <block, NTHREADS_MATCH>>>
         (descq_d, desct_d, pitch1, desc_train.rows, dmatches_d);
 
@@ -1624,7 +1642,6 @@ __global__ void MatchDescriptors(unsigned char *d1, unsigned char *d2,
     int size4 = ceil(0.5f * patsize);
     int numPts = h_pts.size();
 
-    std::cout << "input num points " << h_pts.size() << std::endl;
     // TimerGPU timer0(0);
     dim3 blocks(numPts);
     dim3 threads(EXTRACT_S);

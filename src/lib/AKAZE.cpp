@@ -312,25 +312,7 @@ void AKAZE::Feature_Detection(std::vector<cv::KeyPoint>& kpts) {
     FindExtrema(Ldet, LdetP, LdetN, border, thresh, i, evolution_[i].octave,
                 size, cuda_points, options_.maxkeypoints);
   }
-  std::cout << "GetPoint 1\n";
   GetPoints(kpts, cuda_points);
-
-
-  float minx = 10000;
-  float maxx = 0;
-  float miny = 10000;
-  float maxy = 0;
-  for(int i=0; i<kpts.size(); ++i) {
-      cv::KeyPoint& k = kpts[i];
-      minx = min(minx,k.pt.x);
-      maxx = max(maxx,k.pt.x);
-      miny = min(miny,k.pt.y);
-      maxy = max(maxy,k.pt.y);
-  }
-
-
-  std::cout << "Min and max keypoint coordinates: " << minx << " " << miny << " " << maxx << " " << maxy << std::endl;
-
 
   double t3 = cv::getTickCount();
   timing_.extrema = 1000.0 * (t3 - t2) / cv::getTickFrequency();
@@ -633,16 +615,13 @@ void AKAZE::Compute_Descriptors(std::vector<cv::KeyPoint>& kpts,
   }
 
 #if 1
-  int pattern_size = options_.descriptor_pattern_size;
-  FindOrientation(kpts, cuda_points, cuda_buffers, cuda_images);
-  GetPoints(kpts, cuda_points);  //%%%%
-  unsigned char* desc_h = new unsigned char[kpts.size() * 61];
-  ExtractDescriptors(kpts, cuda_points, cuda_buffers, cuda_images, desc_h,
-                     pattern_size);
-    memcpy(desc.data, desc_h, kpts.size()*61);
-  delete[] desc_h;
+	int pattern_size = options_.descriptor_pattern_size;
+	FindOrientation(kpts, cuda_points, cuda_buffers, cuda_images);
+	GetPoints(kpts, cuda_points);  //%%%%
+	ExtractDescriptors(kpts, cuda_points, cuda_buffers, cuda_images, desc.data,
+					   pattern_size);
 #endif
-
+	
 #if 0
   switch (options_.descriptor) {
     case SURF_UPRIGHT:  // Upright descriptors, not invariant to rotation

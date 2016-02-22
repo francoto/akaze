@@ -150,11 +150,11 @@ int main(int argc, char *argv[]) {
   // ORB Features
   //*****************
 #if CV_VERSION_EPOCH == 2
-  cv::ORB orb(ORB_MAX_KPTS, ORB_SCALE_FACTOR, ORB_PYRAMID_LEVELS,
+  cv::ORB orb(ORB_MAX_KPTS, ORB_SCALE_FACTOR, ORB_PYRAMID_LEVELS, ORB_EDGE_THRESHOLD, ORB_FIRST_PYRAMID_LEVEL, ORB_WTA_K, ORB_PATCH_SIZE);
 #else
-  cv::Ptr<cv::ORB> orb = cv::ORB::create(ORB_MAX_KPTS, ORB_SCALE_FACTOR, ORB_PYRAMID_LEVELS,
+  cv::Ptr<cv::ORB> orb = cv::ORB::create(ORB_MAX_KPTS, ORB_SCALE_FACTOR, ORB_PYRAMID_LEVELS, ORB_EDGE_THRESHOLD, ORB_FIRST_PYRAMID_LEVEL, ORB_WTA_K, ORB_PATCH_SIZE);
 #endif
-    ORB_EDGE_THRESHOLD, ORB_FIRST_PYRAMID_LEVEL, ORB_WTA_K, ORB_PATCH_SIZE);
+    
 
   t1 = cv::getTickCount();
 
@@ -287,6 +287,14 @@ int main(int argc, char *argv[]) {
   // Binary descriptor, use Hamming distance
   else
     matcher_l1->knnMatch(desc1_akaze, desc2_akaze, dmatches_akaze, 2);
+			  
+/*	int msum = 0;
+	for(auto mtch : dmatches_akaze) {
+		msum += mtch[0].distance;
+	}
+	
+	std::cout << "total matched distance: " << msum << std::endl;
+*/			  
 
   matches2points_nndr(kpts1_akaze,kpts2_akaze,dmatches_akaze,matches_akaze,DRATIO);
 
