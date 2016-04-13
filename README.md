@@ -1,5 +1,19 @@
 ## README - A-KAZE Features
 
+This is a fork of libAKAZE with modifications to run it on the GPU using CUDA
+
+The interface should be the same. Keypoins and descriptors are returned on the CPU for later matching etc. using e.g. OpenCV. We also provide a rudimentary brute force matcher running on the GPU.
+
+Currently the code runs in legacy mode, generating the same results as the CPU code. In a future update, by changing a flag, a faster version can be used. On a 16 core Xeon with a Titan X card the (average) timing looks roughly as below:
+
+| Operation     | CPU (ms)      | GPU (ms)  |
+| ------------- |:-------------:|:---------:|
+| Detection     |      117      |    6.5    |
+| Descriptor    |      10       |    0.9    |
+
+
+---
+
 Version: 1.5.0
 Date: 11-12-2014
 
