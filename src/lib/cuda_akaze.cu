@@ -16,59 +16,52 @@
 #define ORIENT_S (13 * 16)
 #define EXTRACT_S 64
 
-static const float atan2_p1 = 0.9997878412794807f * (float)(180 / CV_PI);
-static const float atan2_p3 = -0.3258083974640975f * (float)(180 / CV_PI);
-static const float atan2_p5 = 0.1555786518463281f * (float)(180 / CV_PI);
-static const float atan2_p7 = -0.04432655554792128f * (float)(180 / CV_PI);
-
 __device__ __constant__ float d_Kernel[21];
 __device__ unsigned int d_PointCounter[1];
+__device__ unsigned int d_ExtremaIdx[16];
 
 __device__ __constant__ int comp_idx_1[61 * 8];
 __device__ __constant__ int comp_idx_2[61 * 8];
 
-__device__ __constant__ float norm_factors[29];
+cudaStream_t copyStream;
 
-__device__ float fastAtan2(float y, float x) {
-  float ax = std::abs(x), ay = std::abs(y);
-  float a, c, c2;
-  if (ax >= ay) {
-    c = ay / (ax + (float)DBL_EPSILON);
-    c2 = c * c;
-    a = (((atan2_p7 * c2 + atan2_p5) * c2 + atan2_p3) * c2 + atan2_p1) * c;
-  } else {
-    c = ax / (ay + (float)DBL_EPSILON);
-    c2 = c * c;
-    a = 90.f -
-        (((atan2_p7 * c2 + atan2_p5) * c2 + atan2_p3) * c2 + atan2_p1) * c;
-  }
-  if (x < 0) a = 180.f - a;
-  if (y < 0) a = 360.f - a;
-  return a;
+//__device__ __constant__ float norm_factors[29];
+
+void WaitCuda() {
+    cudaStreamSynchronize(copyStream);
 }
 
+struct Conv_t {
+  float *d_Result;
+  float *d_Data;
+  int width;
+  int pitch;
+  int height;
+};
+
 template <int RADIUS>
-__global__ void ConvRowGPU(float *d_Result, float *d_Data, int width, int pitch,
-                           int height) {
+__global__ void ConvRowGPU(struct Conv_t s) {
+  //__global__ void ConvRowGPU(float *d_Result, float *d_Data, int width, int
+  //pitch, int height) {
   __shared__ float data[CONVROW_W + 2 * RADIUS];
   const int tx = threadIdx.x;
   const int minx = blockIdx.x * CONVROW_W;
-  const int maxx = min(minx + CONVROW_W, width);
-  const int yptr = blockIdx.y * pitch;
+  const int maxx = min(minx + CONVROW_W, s.width);
+  const int yptr = blockIdx.y * s.pitch;
   const int loadPos = minx + tx - RADIUS;
   const int writePos = minx + tx;
 
   if (loadPos < 0)
-    data[tx] = d_Data[yptr];
-  else if (loadPos >= width)
-    data[tx] = d_Data[yptr + width - 1];
+    data[tx] = s.d_Data[yptr];
+  else if (loadPos >= s.width)
+    data[tx] = s.d_Data[yptr + s.width - 1];
   else
-    data[tx] = d_Data[yptr + loadPos];
+    data[tx] = s.d_Data[yptr + loadPos];
   __syncthreads();
   if (writePos < maxx && tx < CONVROW_W) {
     float sum = 0.0f;
     for (int i = 0; i <= (2 * RADIUS); i++) sum += data[tx + i] * d_Kernel[i];
-    d_Result[yptr + writePos] = sum;
+    s.d_Result[yptr + writePos] = sum;
   }
 }
 
@@ -76,43 +69,44 @@ __global__ void ConvRowGPU(float *d_Result, float *d_Data, int width, int pitch,
 // Column convolution filter
 ///////////////////////////////////////////////////////////////////////////////
 template <int RADIUS>
-__global__ void ConvColGPU(float *d_Result, float *d_Data, int width, int pitch,
-                           int height) {
+__global__ void ConvColGPU(struct Conv_t s) {
+  //__global__ void ConvColGPU(float *d_Result, float *d_Data, int width, int
+  //pitch, int height) {
   __shared__ float data[CONVCOL_W * (CONVCOL_H + 2 * RADIUS)];
   const int tx = threadIdx.x;
   const int ty = threadIdx.y;
   const int miny = blockIdx.y * CONVCOL_H;
-  const int maxy = min(miny + CONVCOL_H, height) - 1;
+  const int maxy = min(miny + CONVCOL_H, s.height) - 1;
   const int totStart = miny - RADIUS;
   const int totEnd = maxy + RADIUS;
   const int colStart = blockIdx.x * CONVCOL_W + tx;
-  const int colEnd = colStart + (height - 1) * pitch;
+  const int colEnd = colStart + (s.height - 1) * s.pitch;
   const int smemStep = CONVCOL_W * CONVCOL_S;
-  const int gmemStep = pitch * CONVCOL_S;
+  const int gmemStep = s.pitch * CONVCOL_S;
 
-  if (colStart < width) {
+  if (colStart < s.width) {
     int smemPos = ty * CONVCOL_W + tx;
-    int gmemPos = colStart + (totStart + ty) * pitch;
+    int gmemPos = colStart + (totStart + ty) * s.pitch;
     for (int y = totStart + ty; y <= totEnd; y += blockDim.y) {
       if (y < 0)
-        data[smemPos] = d_Data[colStart];
-      else if (y >= height)
-        data[smemPos] = d_Data[colEnd];
+        data[smemPos] = s.d_Data[colStart];
+      else if (y >= s.height)
+        data[smemPos] = s.d_Data[colEnd];
       else
-        data[smemPos] = d_Data[gmemPos];
+        data[smemPos] = s.d_Data[gmemPos];
       smemPos += smemStep;
       gmemPos += gmemStep;
     }
   }
   __syncthreads();
-  if (colStart < width) {
+  if (colStart < s.width) {
     int smemPos = ty * CONVCOL_W + tx;
-    int gmemPos = colStart + (miny + ty) * pitch;
+    int gmemPos = colStart + (miny + ty) * s.pitch;
     for (int y = miny + ty; y <= maxy; y += blockDim.y) {
       float sum = 0.0f;
       for (int i = 0; i <= 2 * RADIUS; i++)
         sum += data[smemPos + i * CONVCOL_W] * d_Kernel[i];
-      d_Result[gmemPos] = sum;
+      s.d_Result[gmemPos] = sum;
       smemPos += smemStep;
       gmemPos += gmemStep;
     }
@@ -138,14 +132,20 @@ double SeparableFilter(CudaImage &inimg, CudaImage &outimg, CudaImage &temp,
 
   dim3 blockGridRows(iDivUp(width, CONVROW_W), height);
   dim3 threadBlockRows(CONVROW_W + 2 * RADIUS);
-  ConvRowGPU<RADIUS> << <blockGridRows, threadBlockRows>>>
-      (d_Temp, d_DataA, width, pitch, height);
+  struct Conv_t s;
+  s.d_Result = d_Temp;
+  s.d_Data = d_DataA;
+  s.width = width;
+  s.pitch = pitch;
+  s.height = height;
+  ConvRowGPU<RADIUS> << <blockGridRows, threadBlockRows>>> (s);
   // checkMsg("ConvRowGPU() execution failed\n");
   // safeCall(cudaThreadSynchronize());
   dim3 blockGridColumns(iDivUp(width, CONVCOL_W), iDivUp(height, CONVCOL_H));
   dim3 threadBlockColumns(CONVCOL_W, CONVCOL_S);
-  ConvColGPU<RADIUS> << <blockGridColumns, threadBlockColumns>>>
-      (d_DataB, d_Temp, width, pitch, height);
+  s.d_Result = d_DataB;
+  s.d_Data = d_Temp;
+  ConvColGPU<RADIUS> << <blockGridColumns, threadBlockColumns>>> (s);
   // checkMsg("ConvColGPU() execution failed\n");
   // safeCall(cudaThreadSynchronize());
 
@@ -262,16 +262,16 @@ double Flow(CudaImage &img, CudaImage &flow, DIFFUSIVITY_TYPE type,
   Flow << <blocks, threads>>> (img.d_data, flow.d_data, img.width, img.pitch,
                                img.height, type,
                                1.0f / (kcontrast * kcontrast));
-  //  //checkMsg("Flow() execution failed\n");
-  //  //safeCall(cudaThreadSynchronize());
-  double gpuTime = 0;  // timer0.read();
+  // checkMsg("Flow() execution failed\n");
+  // safeCall(cudaThreadSynchronize());
+  double gpuTime = 0;  // = timer0.read();
 #ifdef VERBOSE
   printf("Flow time =                   %.2f ms\n", gpuTime);
 #endif
   return gpuTime;
 }
 
-struct NLDStruct {
+struct NLDStep_t {
   float *imgd;
   float *flod;
   float *temd;
@@ -281,35 +281,9 @@ struct NLDStruct {
   float stepsize;
 };
 
-__global__ void NLDStep(float *imgd, float *flod, float *temd, int width,
-                        int pitch, int height, float stepsize) {
-#undef BW
-#define BW (NLDSTEP_W + 2)
-  __shared__ float ibuff[BW * (NLDSTEP_H + 2)];
-  __shared__ float fbuff[BW * (NLDSTEP_H + 2)];
-  int tx = threadIdx.x;
-  int ty = threadIdx.y;
-  int x = blockIdx.x * NLDSTEP_W + tx;
-  int y = blockIdx.y * NLDSTEP_H + ty;
-  int xp = (x == 0 ? 0 : (x > width ? width - 1 : x - 1));
-  int yp = (y == 0 ? 0 : (y > height ? height - 1 : y - 1));
-  ibuff[ty * BW + tx] = imgd[yp * pitch + xp];
-  fbuff[ty * BW + tx] = flod[yp * pitch + xp];
-  __syncthreads();
-  if (tx < NLDSTEP_W && ty < NLDSTEP_H && x < width && y < height) {
-    float *ib = ibuff + (ty + 1) * BW + (tx + 1);
-    float *fb = fbuff + (ty + 1) * BW + (tx + 1);
-    float ib0 = ib[0];
-    float fb0 = fb[0];
-    float xpos = (fb0 + fb[+1]) * (ib[+1] - ib0);
-    float xneg = (fb0 + fb[-1]) * (ib0 - ib[-1]);
-    float ypos = (fb0 + fb[+BW]) * (ib[+BW] - ib0);
-    float yneg = (fb0 + fb[-BW]) * (ib0 - ib[-BW]);
-    temd[y * pitch + x] = stepsize * (xpos - xneg + ypos - yneg);
-  }
-}
-
-__global__ void NLDStep(NLDStruct s) {
+//__global__ void NLDStep(float *imgd, float *flod, float *temd, int width, int
+// pitch, int height, float stepsize)
+__global__ void NLDStep(NLDStep_t s) {
 #undef BW
 #define BW (NLDSTEP_W + 2)
   __shared__ float ibuff[BW * (NLDSTEP_H + 2)];
@@ -332,19 +306,26 @@ __global__ void NLDStep(NLDStruct s) {
     float xneg = (fb0 + fb[-1]) * (ib0 - ib[-1]);
     float ypos = (fb0 + fb[+BW]) * (ib[+BW] - ib0);
     float yneg = (fb0 + fb[-BW]) * (ib0 - ib[-BW]);
-    s.imgd[y * s.pitch + x] =
-        s.imgd[y * s.pitch + x] +
-        s.stepsize * (xpos - xneg + ypos - yneg);  // temd[y*pitch + x];
+    s.temd[y * s.pitch + x] = s.stepsize * (xpos - xneg + ypos - yneg);
   }
 }
 
-__global__ void NLDUpdate(float *imgd, float *temd, int width, int pitch,
-                          int height) {
+struct NLDUpdate_t {
+  float *imgd;
+  float *temd;
+  int width;
+  int pitch;
+  int height;
+};
+
+//__global__ void NLDUpdate(float *imgd, float *temd, int width, int pitch, int
+// height)
+__global__ void NLDUpdate(NLDUpdate_t s) {
   int x = blockIdx.x * 32 + threadIdx.x;
   int y = blockIdx.y * 16 + threadIdx.y;
-  if (x < width && y < height) {
-    int p = y * pitch + x;
-    imgd[p] = imgd[p] + temd[p];
+  if (x < s.width && y < s.height) {
+    int p = y * s.pitch + x;
+    s.imgd[p] = s.imgd[p] + s.temd[p];
   }
 }
 
@@ -353,7 +334,7 @@ double NLDStep(CudaImage &img, CudaImage &flow, CudaImage &temp,
   // TimerGPU timer0(0);
   dim3 blocks0(iDivUp(img.width, NLDSTEP_W), iDivUp(img.height, NLDSTEP_H));
   dim3 threads0(NLDSTEP_W + 2, NLDSTEP_H + 2);
-  NLDStruct s;
+  NLDStep_t s;
   s.imgd = img.d_data;
   s.flod = flow.d_data;
   s.temd = temp.d_data;
@@ -361,17 +342,25 @@ double NLDStep(CudaImage &img, CudaImage &flow, CudaImage &temp,
   s.pitch = img.pitch;
   s.height = img.height;
   s.stepsize = 0.5 * stepsize;
-  NLDStep<<<blocks0, threads0>>>(img.d_data, flow.d_data, temp.d_data,
-                                 img.width, img.pitch, img.height, 0.5f*stepsize);
+  // NLDStep<<<blocks0, threads0>>>(img.d_data, flow.d_data, temp.d_data,
+  // img.width, img.pitch, img.height, 0.5f*stepsize);
+  NLDStep << <blocks0, threads0>>> (s);
   // checkMsg("NLDStep() execution failed\n");
   // safeCall(cudaThreadSynchronize());
   dim3 blocks1(iDivUp(img.width, 32), iDivUp(img.height, 16));
   dim3 threads1(32, 16);
-    NLDUpdate<<<blocks1, threads1>>>(img.d_data, temp.d_data, img.width,
-                                     img.pitch, img.height);
-  //  checkMsg("NLDUpdate() execution failed\n");
-//    safeCall(cudaThreadSynchronize());
-  double gpuTime = 0;  // timer0.read();
+  NLDUpdate_t su;
+  su.imgd = img.d_data;
+  su.temd = temp.d_data;
+  su.width = img.width;
+  su.height = img.height;
+  su.pitch = img.pitch;
+  // NLDUpdate<<<blocks1, threads1>>>(img.d_data, temp.d_data, img.width,
+  // img.pitch, img.height);
+  NLDUpdate << <blocks1, threads1>>> (su);
+  // checkMsg("NLDUpdate() execution failed\n");
+  // safeCall(cudaThreadSynchronize());
+  double gpuTime = 0;  // = timer0.read();
 #ifdef VERBOSE
   printf("NLDStep time =                %.2f ms\n", gpuTime);
 #endif
@@ -387,38 +376,16 @@ __global__ void HalfSample(float *iimd, float *oimd, int iwidth, int iheight,
   int y = blockIdx.y * 16 + ty;
   if (x >= owidth || y >= oheight) return;
   float *ptri = iimd + (2 * y) * ipitch + (2 * x);
-    if (2*owidth==iwidth) {
-        buffer[ty*32 + tx] = owidth*(ptri[0] + ptri[1]);
-        ptri += ipitch;
-        buffer[ty*32 + tx + 16] = owidth*(ptri[0] + ptri[1]);
-        if (ty==15) {
-            ptri += ipitch;
-            buffer[tx + 32*16] = owidth*(ptri[0] + ptri[1]);
-        } else if (y*2+3 == iheight) {
-            ptri += ipitch;
-            buffer[tx + 32*(ty+1)] = owidth*(ptri[0] + ptri[1]);
-        }
-    } else {
-        float f0 = owidth - x;
-        float f2 = 1 + x;
-        buffer[ty*32 + tx] = f0*ptri[0] + owidth*ptri[1] + f2*ptri[2];
-        ptri += ipitch;
-        buffer[ty*32 + tx + 16] = f0*ptri[0] + owidth*ptri[1] + f2*ptri[2];
-        if (ty==15 && 2*oheight!=iheight) {
-            ptri += ipitch;
-            buffer[tx + 32*16] = f0*ptri[0] + owidth*ptri[1] + f2*ptri[1];
-        } else if (y*2+3 == iheight && 2*oheight!=iheight) {
-            ptri += ipitch;
-            buffer[tx + 32*(ty+1)] = f0*ptri[0] + owidth*ptri[1] + f2*ptri[2];
-        }
-    }
-/*  if (2 * owidth == iwidth) {
+  if (2 * owidth == iwidth) {
     buffer[ty * 32 + tx] = owidth * (ptri[0] + ptri[1]);
     ptri += ipitch;
     buffer[ty * 32 + tx + 16] = owidth * (ptri[0] + ptri[1]);
     if (ty == 15) {
       ptri += ipitch;
       buffer[tx + 32 * 16] = owidth * (ptri[0] + ptri[1]);
+    } else if (y * 2 + 3 == iheight) {
+      ptri += ipitch;
+      buffer[tx + 32 * (ty + 1)] = owidth * (ptri[0] + ptri[1]);
     }
   } else {
     float f0 = owidth - x;
@@ -429,8 +396,12 @@ __global__ void HalfSample(float *iimd, float *oimd, int iwidth, int iheight,
     if (ty == 15 && 2 * oheight != iheight) {
       ptri += ipitch;
       buffer[tx + 32 * 16] = f0 * ptri[0] + owidth * ptri[1] + f2 * ptri[1];
+    } else if (y * 2 + 3 == iheight && 2 * oheight != iheight) {
+      ptri += ipitch;
+      buffer[tx + 32 * (ty + 1)] =
+          f0 * ptri[0] + owidth * ptri[1] + f2 * ptri[2];
     }
-  }*/
+  }
   __syncthreads();
   float *buff = buffer + 32 * ty + tx;
   if (2 * oheight == iheight)
@@ -490,9 +461,12 @@ double Copy(CudaImage &inimg, CudaImage &outimg) {
   return gpuTime;
 }
 
-float *AllocBuffers(int width, int height, int num, int omax, int maxpts,
+float *AllocBuffers(int width, int height, int num, int omax, int &maxpts,
                     std::vector<CudaImage> &buffers, cv::KeyPoint *&pts,
-                    CudaImage *&ims) {
+                    cv::KeyPoint *&ptsbuffer, short *&ptindices, unsigned char *&desc, float *&descbuffer, CudaImage *&ims) {
+
+  maxpts = 4 * ((maxpts+3)/4);
+
   buffers.resize(omax * num);
   int w = width;
   int h = height;
@@ -513,10 +487,21 @@ float *AllocBuffers(int width, int height, int num, int omax, int maxpts,
   }
   int ptsstart = size;
   size += sizeof(cv::KeyPoint) * maxpts / sizeof(float);
+  int ptsbufferstart = size;
+  size += sizeof(cv::KeyPoint) * maxpts / sizeof(float);
+  int descstart = size;
+  size += sizeof(unsigned char)*maxpts*61/sizeof(float);
+  int descbufferstart = size;
+  size += sizeof(float)*3*29*maxpts / sizeof(float);
+  int indicesstart = size;
+  size += 21*21*sizeof(short)*maxpts/sizeof(float);
   int imgstart = size;
   size += sizeof(CudaImage) * (num * omax + sizeof(float) - 1) / sizeof(float);
   float *memory = NULL;
   size_t pitch;
+
+  std::cout << "allocating " << size/1024./1024. << " Mbytes of gpu memory\n";
+
   safeCall(cudaMallocPitch((void **)&memory, &pitch, (size_t)4096,
                            (size + 4095) / 4096 * sizeof(float)));
   for (int i = 0; i < omax * num; i++) {
@@ -524,9 +509,19 @@ float *AllocBuffers(int width, int height, int num, int omax, int maxpts,
     buf.d_data = memory + (long)buf.d_data;
   }
   pts = (cv::KeyPoint *)(memory + ptsstart);
+  ptsbuffer = (cv::KeyPoint *)(memory + ptsbufferstart);
+  desc = (unsigned char *)(memory + descstart);
+  descbuffer = (float*)(memory + descbufferstart);
+  ptindices = (short*)(memory + indicesstart);
   ims = (CudaImage *)(memory + imgstart);
+
+  InitCompareIndices();
+
+  cudaStreamCreate(&copyStream);
+
   return memory;
 }
+
 
 void FreeBuffers(float *buffers) { safeCall(cudaFree(buffers)); }
 
@@ -715,18 +710,22 @@ double HessianDeterminant(CudaImage &img, CudaImage &lx, CudaImage &ly,
 }
 
 __global__ void FindExtrema(float *imd, float *imp, float *imn, int maxx,
-                            int pitch, int maxy, int border, float dthreshold,
+                            int pitch, int maxy, float border, float dthreshold,
                             int scale, int octave, float size,
                             cv::KeyPoint *pts, int maxpts) {
   int x = blockIdx.x * 32 + threadIdx.x;
   int y = blockIdx.y * 16 + threadIdx.y;
-  if (x < border || x >= maxx || y < border || y >= maxy) return;
+
+  int left_x = (int)(x - border + 0.5f) - 1;
+  int right_x = (int)(x + border + 0.5f) + 1;
+  int up_y = (int)(y - border + 0.5f) - 1;
+  int down_y = (int)(y + border + 0.5f) + 1;
+  if (left_x < 0 || right_x >= maxx || up_y < 0 || down_y >= maxy) return;
   int p = y * pitch + x;
   float v = imd[p];
   if (v > dthreshold && v > imd[p - pitch - 1] && v > imd[p + pitch + 1] &&
-      v > imd[p - pitch + 1] && v > imd[p - pitch + 1] && v > imd[p - 1] &&
-      v > imd[p + 1] && v > imd[p + pitch] && v > imd[p - pitch] &&
-      v >= imn[p] && v >= imp[p]) {
+      v > imd[p + pitch - 1] && v > imd[p - pitch + 1] && v > imd[p - 1] &&
+      v > imd[p + 1] && v > imd[p + pitch] && v > imd[p - pitch]) {
     float dx = 0.5f * (imd[p + 1] - imd[p - 1]);
     float dy = 0.5f * (imd[p + pitch] - imd[p - pitch]);
     float dxx = imd[p + 1] + imd[p - 1] - 2.0f * v;
@@ -737,22 +736,28 @@ __global__ void FindExtrema(float *imd, float *imp, float *imn, int maxx,
     float idet = (det != 0.0f ? 1.0f / det : 0.0f);
     float dst0 = idet * (dxy * dy - dyy * dx);
     float dst1 = idet * (dxy * dx - dxx * dy);
+    bool weak = true;
     if (dst0 >= -1.0f && dst0 <= 1.0f && dst1 >= -1.0f && dst1 <= 1.0f) {
-      unsigned int idx = atomicInc(d_PointCounter, 0x7fffffff);
-      if (idx < maxpts) {
-        cv::KeyPoint &point = pts[idx];
-        point.response = v;
-        point.size = 2.0f * size;
-        point.octave = octave;
-        point.class_id = scale;
-        int ratio = (1 << octave);
-        point.pt.x = ratio * (x + dst0);
-        point.pt.y = ratio * (y + dst1);
-        point.angle = 0.0f;
-        // printf("XXX %d %d %.2f %.2f XXX\n", x, y, dst0, dst1);
-      }
+      weak = 0;
+    }
+    unsigned int idx = atomicInc(d_PointCounter, 0x7fffffff);
+    if (idx < maxpts) {
+      cv::KeyPoint &point = pts[idx];
+      point.response = v;
+      point.size = (weak ? -1 : 1) * 2.0 * size;
+      float octsub = (dst0 < 0 ? -1 : 1) * (octave + fabs(dst0));
+      *(float *)(&point.octave) = (weak ? octave : octsub);
+      point.class_id = scale;
+      int ratio = (1 << octave);
+      point.pt.x = ratio * (x);
+      point.pt.y = ratio * (y);
+      point.angle = dst1;
     }
   }
+}
+
+__global__ void CopyIdxArray(int scale) {
+  d_ExtremaIdx[scale] = d_PointCounter[0];
 }
 
 double FindExtrema(CudaImage &img, CudaImage &imgp, CudaImage &imgn,
@@ -761,10 +766,13 @@ double FindExtrema(CudaImage &img, CudaImage &imgp, CudaImage &imgn,
   // TimerGPU timer0(0);
   dim3 blocks(iDivUp(img.width, 32), iDivUp(img.height, 16));
   dim3 threads(32, 16);
-  int b = (int)border;
+  float b = border;
   FindExtrema << <blocks, threads>>>
-      (img.d_data, imgp.d_data, imgn.d_data, img.width - b, img.pitch,
-       img.height - b, b, dthreshold, scale, octave, size, pts, maxpts);
+      (img.d_data, imgp.d_data, imgn.d_data, img.width, img.pitch, img.height,
+       b, dthreshold, scale, octave, size, pts, maxpts);
+
+  CopyIdxArray << <1, 1>>> (scale);
+
   // checkMsg("FindExtrema() execution failed\n");
   // safeCall(cudaThreadSynchronize());
   double gpuTime = 0;  // timer0.read();
@@ -779,14 +787,417 @@ void ClearPoints() {
   safeCall(cudaMemcpyToSymbolAsync(d_PointCounter, &totPts, sizeof(int)));
 }
 
-int GetPoints(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts) {
-  int numPts = 0;
-  safeCall(cudaMemcpyFromSymbolAsync(&numPts, d_PointCounter, sizeof(int)));
+__forceinline__ __device__ void atomicSort(short *pts, int shmidx, int offset,
+                                           int sortdir) {
+  short &p0 = pts[shmidx + sortdir];
+  short &p1 = pts[shmidx + (offset - sortdir)];
+
+  if (p0 < p1) {
+    int t = p0;
+    p0 = p1;
+    p1 = t;
+  }
+}
+
+__forceinline__ __device__ bool atomicCompare(const cv::KeyPoint &i,
+                                              const cv::KeyPoint &j) {
+  float t = i.pt.x * j.pt.x;
+  if (t == 0) {
+    if (j.pt.x != 0) {
+      return false;
+    } else {
+      return true;
+    }
+  }
+
+  if (i.pt.y < j.pt.y) return true;
+  if (i.pt.y == j.pt.y && i.pt.x < j.pt.x) return true;
+
+  return false;
+}
+
+struct sortstruct_t {
+  int idx;
+  float x;
+  float y;
+};
+
+__forceinline__ __device__ bool atomicCompare(const sortstruct_t &i,
+                                              const sortstruct_t &j) {
+  float t = i.x * j.x;
+  if (t == 0) {
+    if (j.x != 0) {
+      return false;
+    } else {
+      return true;
+    }
+  }
+
+  if (i.y < j.y) return true;
+
+  if (i.y == j.y && i.x < j.x) return true;
+
+  return false;
+}
+
+__forceinline__ __device__ void atomicSort(sortstruct_t *pts, int shmidx,
+                                           int offset, int sortdir) {
+  sortstruct_t &p0 = pts[(shmidx + sortdir)];
+  sortstruct_t &p1 = pts[(shmidx + (offset - sortdir))];
+
+  if (atomicCompare(p0, p1)) {
+    int idx = p0.idx;
+    float ptx = p0.x;
+    float pty = p0.y;
+    p0.idx = p1.idx;
+    p0.x = p1.x;
+    p0.y = p1.y;
+    p1.idx = idx;
+    p1.x = ptx;
+    p1.y = pty;
+  }
+}
+
+#define BitonicSortThreads 1024
+template <class T>
+__global__ void bitonicSort(const T *pts, T *newpts) {
+  int scale = blockIdx.x;
+
+  __shared__ struct sortstruct_t shm[2 * BitonicSortThreads];
+
+  int first = scale == 0 ? 0 : d_ExtremaIdx[scale - 1];
+  int last = d_ExtremaIdx[scale];
+
+  int nkpts = last - first;
+
+  const cv::KeyPoint *tmpg = &pts[first];
+
+  for (int i = threadIdx.x; i < 2 * BitonicSortThreads;
+       i += BitonicSortThreads) {
+    if (i < nkpts) {
+      shm[i].idx = i;
+      shm[i].y = tmpg[i].pt.y;
+      shm[i].x = tmpg[i].pt.x;
+    } else {
+      shm[i].idx = i;
+      shm[i].y = 0;
+      shm[i].x = 0;
+    }
+  }
+  __syncthreads();
+
+  for (int i = 1; i < 2 * BitonicSortThreads; i <<= 1) {
+    int sortdir = (threadIdx.x & i) > 0 ? 0 : 1;
+
+    for (int j = i; j > 0; j >>= 1) {
+      int mask = 0x0fffffff * j;
+      int tidx = ((threadIdx.x & mask) << 1) + (threadIdx.x & ~mask);
+      atomicSort(shm, tidx, j, j * sortdir);
+      __syncthreads();
+    }
+  }
+
+  cv::KeyPoint *tmpnewg = &newpts[first];
+  for (int i = 0; i < 2 * BitonicSortThreads * sizeof(T) / sizeof(int);
+       i += BitonicSortThreads) {
+    if (i + threadIdx.x < nkpts) {
+      tmpnewg[i + threadIdx.x].angle = tmpg[shm[i + threadIdx.x].idx].angle;
+      tmpnewg[i + threadIdx.x].class_id =
+          tmpg[shm[i + threadIdx.x].idx].class_id;
+      tmpnewg[i + threadIdx.x].octave = tmpg[shm[i + threadIdx.x].idx].octave;
+      tmpnewg[i + threadIdx.x].pt.y = tmpg[shm[i + threadIdx.x].idx].pt.y;
+      tmpnewg[i + threadIdx.x].pt.x = tmpg[shm[i + threadIdx.x].idx].pt.x;
+      tmpnewg[i + threadIdx.x].response =
+          tmpg[shm[i + threadIdx.x].idx].response;
+      tmpnewg[i + threadIdx.x].size = tmpg[shm[i + threadIdx.x].idx].size;
+    }
+  }
+}
+
+#define FindNeighborsThreads 512
+__global__ void FindNeighbors(cv::KeyPoint *pts, short *kptindices, int width) {
+  __shared__ int gidx[1];
+
+  // which scale?
+  int scale = pts[blockIdx.x].class_id;
+
+  int cmpIdx = scale < 2 ? 0 : d_ExtremaIdx[scale - 2];
+
+  float size = pts[blockIdx.x].size;
+
+  gidx[0] = 1;
+  __syncthreads();
+
+  // One keypoint per block.
+  cv::KeyPoint &kpt = pts[blockIdx.x];
+
+  // Key point to compare. only compare with smaller than current
+  for (int i = cmpIdx + threadIdx.x; i < blockIdx.x;
+       i += FindNeighborsThreads) {
+    cv::KeyPoint &kpt_cmp = pts[i];
+
+    float dist = (kpt.pt.x - kpt_cmp.pt.x) * (kpt.pt.x - kpt_cmp.pt.x) +
+                 (kpt.pt.y - kpt_cmp.pt.y) * (kpt.pt.y - kpt_cmp.pt.y);
+
+    if (dist < size * size * 0.25) {
+      int idx = atomicAdd(gidx, 1);
+      kptindices[blockIdx.x * width + idx] = i;
+    }
+  }
+
+  __syncthreads();
+
+  if (threadIdx.x == 0) {
+    kptindices[blockIdx.x * width] = gidx[0];
+  }
+}
+
+#define FilterExtremaThreads 1024
+__global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
+                              short *kptindices, int width) {
+  // -1  means not processed
+  // -2  means added but replaced
+  // >=0 means added
+  __shared__ short memberarray[8 * 1024];
+  __shared__ short minneighbor[8 * 1024];
+
+  __shared__ char shouldAdd[8 * 1024];
+
+  __shared__ bool shouldBreak[1];
+  __shared__ size_t curridx[1];
+
+  int nump = d_PointCounter[0];
+
+  for (int i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
+    memberarray[i] = -1;
+  }
+
+  if (threadIdx.x == 0) {
+    shouldBreak[0] = true;
+    curridx[0] = 0;
+  }
+
+  __syncthreads();
+
+  while (true) {
+    // Loop all points
+    for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
+      minneighbor[i] = 5001;
+      shouldAdd[i] = true;
+    }
+    __syncthreads();
+
+    for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
+      int neighborsSize = kptindices[i * width] - 1;
+      short *neighbors = &(kptindices[i * width + 1]);
+
+      // Only do if we didn't process the point before
+      if (memberarray[i] == -1) {
+        // If we process at least one point we shouldn't break
+        // No need to sync. Only want to know if at least one thread wants to
+        // continue
+        shouldBreak[0] = false;
+        // Sort neighbors according to the order of currently added points
+        // (often very few)
+        // If the neighbor has been replaced, stick it to the back
+        // If any neighbor has not been processed, break;
+        bool shouldProcess = true;
+        for (int k = 0; k < neighborsSize; ++k) {
+          // If the point has one or more unprocessed neighbors, skip
+          if (memberarray[neighbors[k]] == -1) {
+            shouldProcess = false;
+            shouldAdd[i] = false;
+            break;
+          }
+          // If it has a neighbor that is in the list, we don't add, but process
+          if (memberarray[neighbors[k]] >= 0) {
+            shouldAdd[i] = false;
+          }
+        }
+
+        // We should process and potentially replace the neighbor
+        if (shouldProcess && !shouldAdd[i]) {
+          // Find the smallest neighbor
+          for (int k = 0; k < neighborsSize; ++k) {
+            for (int j = k + 1; j < neighborsSize; ++j) {
+              if (memberarray[neighbors[k]] == -2 ||
+                  (memberarray[neighbors[j]] != -2 &&
+                   memberarray[neighbors[j]] < memberarray[neighbors[k]])) {
+                int t = neighbors[k];
+                neighbors[k] = neighbors[j];
+                neighbors[j] = t;
+              }
+            }
+          }
+          // Pick the first neighbor
+          // We need to make sure, in case more than one point has this
+          // neighbor,
+          // That the point with lowest memberarrayindex processes it first
+          // Here minneighbor[i] is the target and i the neighbor
+          int nidx = neighbors[0];
+          minneighbor[nidx] = min(minneighbor[nidx], (int)i);
+        }
+      }
+    }
+
+    __syncthreads();
+    // Check which points we can add
+    for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
+      if (memberarray[i] == -1) {
+        if (shouldAdd[i]) {
+          memberarray[i] = i;
+        }
+      }
+    }
+
+    __syncthreads();
+    // Look at the neighbors. If
+    for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
+      if (minneighbor[i] != 5001) {
+        if (memberarray[minneighbor[i]] == -1) {
+          if (!shouldAdd[minneighbor[i]]) {
+            const cv::KeyPoint &p0 = kpts[minneighbor[i]];
+            const cv::KeyPoint &p1 = kpts[i];
+            if (p0.response > p1.response) {
+              memberarray[minneighbor[i]] = i;
+              memberarray[i] = -2;
+            } else {
+              memberarray[minneighbor[i]] = -2;
+            }
+          }
+        }
+      }
+    }
+
+    __syncthreads();
+
+    // Are we done?
+    if (shouldBreak[0]) break;
+
+    if (threadIdx.x == 0) {
+      shouldBreak[0] = true;
+    }
+    __syncthreads();
+  }
+
+  __syncthreads();
+
+  // Sort array
+  short upper = (nump + 2047) / 2048;
+  upper *= 2048;
+
+  int offset = 0;
+  for (short i = threadIdx.x; i < upper; i += 2 * FilterExtremaThreads) {
+    minneighbor[threadIdx.x] =
+        i >= nump ? 10001 : (memberarray[i] < 0 ? 10001 : (kpts[memberarray[i]].size < 0 ? 10001 : memberarray[i]));
+    minneighbor[threadIdx.x + 1024] =
+        i + 1024 >= nump ? 10001
+                         : (memberarray[i + 1024] < 0 ? 10001 : (kpts[memberarray[i+1024]].size < 0 ? 10001 : memberarray[i+1024]));
+
+    __syncthreads();
+
+    // Sort and store keypoints
+    for (int k = 1; k < 2048; k <<= 1) {
+      int sortdir = (threadIdx.x & k) > 0 ? 0 : 1;
+
+      for (int j = k; j > 0; j >>= 1) {
+        int mask = 0x0fffffff * j;
+        int tidx = ((threadIdx.x & mask) << 1) + (threadIdx.x & ~mask);
+        atomicSort(minneighbor, tidx, j, j * sortdir);
+        __syncthreads();
+      }
+    }
+
+    __syncthreads();
+
+    for (int k = threadIdx.x; k < 2048; k += 1024) {
+      if (minneighbor[k] < 10000) {
+          // Restore subpixel component
+          float octsub = fabs(*(float*)(&kpts[minneighbor[k]].octave));
+          int octave = (int)octsub;
+          float subp = (*(float*)(&kpts[minneighbor[k]].octave) < 0 ? -1 : 1) * (octsub - octave);
+          float ratio = 1 << octave;
+        newkpts[k + curridx[0]].pt.y = ratio * ((int)(0.5f+kpts[minneighbor[k]].pt.y / ratio) + kpts[minneighbor[k]].angle);
+        newkpts[k + curridx[0]].pt.x = ratio * ((int)(0.5f+kpts[minneighbor[k]].pt.x / ratio) + subp);
+        // newkpts[k + curridx[0] + threadIdx.x].angle = 0; // This will be set elsewhere
+        newkpts[k + curridx[0]].class_id = kpts[minneighbor[k]].class_id;
+        newkpts[k + curridx[0]].octave = octave;
+        newkpts[k + curridx[0]].response =  kpts[minneighbor[k]].response;
+        newkpts[k + curridx[0]].size = kpts[minneighbor[k]].size;
+      }
+    }
+    __syncthreads();
+
+    offset += 2048;
+
+    // How many did we add?
+    if (minneighbor[2047] < 10000) {
+      curridx[0] += 2048;
+    } else {
+      if (minneighbor[1024] < 10000) {
+        if (threadIdx.x < 1023 && minneighbor[1024 + threadIdx.x] < 10000 &&
+            minneighbor[1024 + threadIdx.x + 1] == 10001) {
+          curridx[0] += 1024 + threadIdx.x + 1;
+        }
+      } else {
+        if (minneighbor[threadIdx.x] < 10000 &&
+            minneighbor[threadIdx.x + 1] == 10001) {
+          curridx[0] += threadIdx.x + 1;
+        }
+      }
+      __syncthreads();
+    }
+  }
+
+  __syncthreads();
+
+  if (threadIdx.x == 0) {
+    d_PointCounter[0] = curridx[0];
+  }
+}
+
+void FilterExtrema(cv::KeyPoint *pts, cv::KeyPoint *newpts, short* kptindices, int& nump) {
+
+  //int nump;
+  cudaMemcpyFromSymbolAsync(&nump, d_PointCounter, sizeof(int));
+
+  int width = ceil(21) * ceil(21);
+
+  // Sort the list of points
+  dim3 blocks(16, 1, 1);
+  dim3 threads(BitonicSortThreads, 1, 1);
+  bitonicSort << <blocks, threads>>> (pts, newpts);
+
+  // Find all neighbors
+  cudaStreamSynchronize(copyStream);
+  blocks.x = nump;
+  threads.x = FindNeighborsThreads;
+  FindNeighbors << <blocks, threads>>> (newpts, kptindices, width);
+
+  // Filter extrema
+  blocks.x = 1;
+  threads.x = FilterExtremaThreads;
+  FilterExtrema_kernel << <blocks, threads>>> (newpts, pts, kptindices, width);
+
+  cudaMemcpyFromSymbolAsync(&nump, d_PointCounter, sizeof(int));
+
+}
+
+
+int GetPoints(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts, int numPts) {
   h_pts.resize(numPts);
-  safeCall(cudaMemcpy((float *)&h_pts[0], d_pts, sizeof(cv::KeyPoint) * numPts,
-                      cudaMemcpyDeviceToHost));
+  safeCall(cudaMemcpyAsync((float *)&h_pts[0], d_pts,
+                           sizeof(cv::KeyPoint) * numPts,
+                           cudaMemcpyDeviceToHost, copyStream));
   return numPts;
 }
+
+
+void GetDescriptors(cv::Mat &h_desc, cv::Mat &d_desc, int numPts) {
+    h_desc = cv::Mat(numPts, 61, CV_8U);
+    cudaMemcpyAsync(h_desc.data, d_desc.data, numPts*61, cudaMemcpyDeviceToHost, copyStream);
+}
+
 
 __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
                                    float *_vals, int size2, int size3,
@@ -843,7 +1254,6 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
     if (m < 2 * size2) {
       int x2 = (x < size2 ? 0 : 1);
       int y2 = (y < size2 ? 0 : 1);
-      // atomicAdd(norm2, (x < size2 && y < size2 ? 1 : 0));
       // Add 2x2
       acc_vals[3 * (y2 * 2 + x2) + 3 * 30 * tx] += im;
       acc_vals[3 * (y2 * 2 + x2) + 3 * 30 * tx + 1] += rx;
@@ -852,7 +1262,6 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
     if (m < 3 * size3) {
       int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
       int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
-      // atomicAdd(norm3, (x < size3 && y < size3 ? 1 : 0));
       // Add 3x3
       acc_vals[3 * (4 + y3 * 3 + x3) + 3 * 30 * tx] += im;
       acc_vals[3 * (4 + y3 * 3 + x3) + 3 * 30 * tx + 1] += rx;
@@ -861,7 +1270,6 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
     if (m < 4 * size4) {
       int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
       int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
-      // atomicAdd(norm4, (x < size4 && y < size4 ? 1 : 0));
       // Add 4x4
       acc_vals[3 * (4 + 9 + y4 * 4 + x4) + 3 * 30 * tx] += im;
       acc_vals[3 * (4 + 9 + y4 * 4 + x4) + 3 * 30 * tx + 1] += rx;
@@ -871,9 +1279,10 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
 
   __syncthreads();
 
+
 // Reduce stuff
-#pragma unroll
   float acc_reg;
+#pragma unroll
   for (int i = 0; i < 15; ++i) {
     // 0..31 takes care of even accs, 32..63 takes care of odd accs
     int offset = 2 * i + (tx < 32 ? 0 : 1);
@@ -1155,246 +1564,6 @@ __global__ void ExtractDescriptors_serial(cv::KeyPoint *d_pts,
   }
 }
 
-__global__ void ExtractDescriptors_atomic_shared(cv::KeyPoint *d_pts,
-                                                 CudaImage *d_imgs,
-                                                 float *_vals, int size2,
-                                                 int size3, int size4) {
-  __shared__ float acc_vals[3 * 30 * EXTRACT_S / 2];
-
-  float *acc_vals_im = &acc_vals[0];
-  float *acc_vals_dx = &acc_vals[30 * EXTRACT_S / 2];
-  float *acc_vals_dy = &acc_vals[2 * 30 * EXTRACT_S / 2];
-
-  int p = blockIdx.x;
-
-  float *vals = &_vals[p * 3 * 29];
-
-  float iratio = 1.0f / (1 << d_pts[p].octave);
-  int scale = (int)(0.5f * d_pts[p].size * iratio + 0.5f);
-  float xf = d_pts[p].pt.x * iratio;
-  float yf = d_pts[p].pt.y * iratio;
-  float ang = d_pts[p].angle;
-  float co = cos(ang);
-  float si = sin(ang);
-  int tx = threadIdx.x;
-  int lev = d_pts[p].class_id;
-  float *imd = d_imgs[4 * lev + 0].d_data;
-  float *dxd = d_imgs[4 * lev + 2].d_data;
-  float *dyd = d_imgs[4 * lev + 3].d_data;
-  int pitch = d_imgs[4 * lev + 0].pitch;
-  int winsize = max(3 * size3, 4 * size4);
-
-  for (int i = 0; i < 15; ++i) {
-    acc_vals_im[i * EXTRACT_S + tx] = 0.f;
-    acc_vals_dx[i * EXTRACT_S + tx] = 0.f;
-    acc_vals_dy[i * EXTRACT_S + tx] = 0.f;
-  }
-
-  __syncthreads();
-
-  for (int i = tx; i < winsize * winsize; i += EXTRACT_S) {
-    int y = i / winsize;
-    int x = i - winsize * y;
-    int m = max(x, y);
-    if (m >= winsize) continue;
-    int l = x - size2;
-    int k = y - size2;
-    int xp = (int)(xf + scale * (k * co - l * si) + 0.5f);
-    int yp = (int)(yf + scale * (k * si + l * co) + 0.5f);
-    int pos = yp * pitch + xp;
-    float im = imd[pos];
-    float dx = dxd[pos];
-    float dy = dyd[pos];
-    float rx = -dx * si + dy * co;
-    float ry = dx * co + dy * si;
-
-    int tx_d = tx & (EXTRACT_S >> 1 - 1);
-    if (m < 2 * size2) {
-      int x2 = (x < size2 ? 0 : 1);
-      int y2 = (y < size2 ? 0 : 1);
-      // atomicAdd(norm2, (x < size2 && y < size2 ? 1 : 0));
-      // Add 2x2
-      atomicAdd(&acc_vals[3 * (y2 * 2 + x2) + 3 * 30 * tx_d], im);
-      atomicAdd(&acc_vals[3 * (y2 * 2 + x2) + 3 * 30 * tx_d + 1], rx);
-      atomicAdd(&acc_vals[3 * (y2 * 2 + x2) + 3 * 30 * tx_d + 2], ry);
-    }
-    if (m < 3 * size3) {
-      int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
-      int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
-      // atomicAdd(norm3, (x < size3 && y < size3 ? 1 : 0));
-      // Add 3x3
-      atomicAdd(&acc_vals[3 * (4 + y3 * 3 + x3) + 3 * 30 * tx_d], im);
-      atomicAdd(&acc_vals[3 * (4 + y3 * 3 + x3) + 3 * 30 * tx_d + 1], rx);
-      atomicAdd(&acc_vals[3 * (4 + y3 * 3 + x3) + 3 * 30 * tx_d + 2], ry);
-    }
-    if (m < 4 * size4) {
-      int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
-      int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
-      // atomicAdd(norm4, (x < size4 && y < size4 ? 1 : 0));
-      // Add 4x4
-      atomicAdd(&acc_vals[3 * (4 + 9 + y4 * 4 + x4) + 3 * 30 * tx_d], im);
-      atomicAdd(&acc_vals[3 * (4 + 9 + y4 * 4 + x4) + 3 * 30 * tx_d + 1], rx);
-      atomicAdd(&acc_vals[3 * (4 + 9 + y4 * 4 + x4) + 3 * 30 * tx_d + 2], ry);
-    }
-  }
-
-  __syncthreads();
-
-// Reduce stuff
-#pragma unroll
-  for (int i = 0; i < 15; ++i) {
-    // 0..31 takes care of even accs, 32..63 takes care of odd accs
-    int offset = 2 * i + (tx < 32 ? 0 : 1);
-    int tx_d = tx < 32 ? tx : tx - 32;
-    /*if (tx_d < 32) {
-      acc_vals[3*30 * tx_d/2 + offset] += acc_vals[3*30/2 * (tx_d + 32) +
-    offset];
-      acc_vals[3*30 * tx_d/2 + offset+30] += acc_vals[3*30/2 * (tx_d + 32) +
-    offset+30];
-      acc_vals[3*30 * tx_d/2 + offset+60] += acc_vals[3*30/2 * (tx_d + 32) +
-    offset+60];
-    }*/
-    if (tx_d < 16) {
-      acc_vals[3 * 30 * tx_d + offset] +=
-          acc_vals[3 * 30 * (tx_d + 16) + offset];
-      acc_vals[3 * 30 * tx_d + offset + 30] +=
-          acc_vals[3 * 30 * (tx_d + 16) + offset + 30];
-      acc_vals[3 * 30 * tx_d + offset + 60] +=
-          acc_vals[3 * 30 * (tx_d + 16) + offset + 60];
-    }
-    if (tx_d < 8) {
-      acc_vals[3 * 30 * tx_d + offset] +=
-          acc_vals[3 * 30 * (tx_d + 8) + offset];
-      acc_vals[3 * 30 * tx_d + offset + 30] +=
-          acc_vals[3 * 30 * (tx_d + 8) + offset + 30];
-      acc_vals[3 * 30 * tx_d + offset + 60] +=
-          acc_vals[3 * 30 * (tx_d + 8) + offset + 60];
-    }
-    if (tx_d < 4) {
-      acc_vals[3 * 30 * tx_d + offset] +=
-          acc_vals[3 * 30 * (tx_d + 4) + offset];
-      acc_vals[3 * 30 * tx_d + offset + 30] +=
-          acc_vals[3 * 30 * (tx_d + 4) + offset + 30];
-      acc_vals[3 * 30 * tx_d + offset + 60] +=
-          acc_vals[3 * 30 * (tx_d + 4) + offset + 60];
-    }
-    if (tx_d < 2) {
-      acc_vals[3 * 30 * tx_d + offset] +=
-          acc_vals[3 * 30 * (tx_d + 2) + offset];
-      acc_vals[3 * 30 * tx_d + offset + 30] +=
-          acc_vals[3 * 30 * (tx_d + 2) + offset + 30];
-      acc_vals[3 * 30 * tx_d + offset + 60] +=
-          acc_vals[3 * 30 * (tx_d + 2) + offset + 60];
-    }
-    if (tx_d < 1) {
-      acc_vals[offset] += acc_vals[3 * 30 + offset];
-      acc_vals[offset + 30] += acc_vals[3 * 30 + offset + 30];
-      acc_vals[offset + 60] += acc_vals[3 * 30 + offset + 60];
-    }
-  }
-
-  __syncthreads();
-
-  // Have 29*3 values to store
-  // They are in acc_vals[0..28,64*30..64*30+28,64*60..64*60+28]
-  if (tx < 29) {
-    vals[tx] = acc_vals[tx];
-    vals[29 + tx] = acc_vals[29 + tx];
-    vals[2 * 29 + tx] = acc_vals[2 * 29 + tx];
-  }
-}
-
-__global__ void ExtractDescriptors_atomic(cv::KeyPoint *d_pts,
-                                          CudaImage *d_imgs, float *_vals,
-                                          int size2, int size3, int size4) {
-  __shared__ float acc_vals[3 * 29];
-
-  float *acc_vals_im = &acc_vals[0];
-  float *acc_vals_dx = &acc_vals[29];
-  float *acc_vals_dy = &acc_vals[2 * 29];
-
-  int p = blockIdx.x;
-
-  float *vals = &_vals[p * 3 * 29];
-
-  float iratio = 1.0f / (1 << d_pts[p].octave);
-  int scale = (int)(0.5f * d_pts[p].size * iratio + 0.5f);
-  float xf = d_pts[p].pt.x * iratio;
-  float yf = d_pts[p].pt.y * iratio;
-  float ang = d_pts[p].angle;
-  float co = cos(ang);
-  float si = sin(ang);
-  int tx = threadIdx.x;
-  int lev = d_pts[p].class_id;
-  float *imd = d_imgs[4 * lev + 0].d_data;
-  float *dxd = d_imgs[4 * lev + 2].d_data;
-  float *dyd = d_imgs[4 * lev + 3].d_data;
-  int pitch = d_imgs[4 * lev + 0].pitch;
-  int winsize = max(3 * size3, 4 * size4);
-
-  if (tx < 29) {
-    acc_vals_im[tx] = 0.f;
-    acc_vals_dx[tx] = 0.f;
-    acc_vals_dy[tx] = 0.f;
-  }
-
-  __syncthreads();
-
-  for (int i = tx; i < winsize * winsize; i += EXTRACT_S) {
-    int y = i / winsize;
-    int x = i - winsize * y;
-    int m = max(x, y);
-    if (m >= winsize) continue;
-    int l = x - size2;
-    int k = y - size2;
-    int xp = (int)(xf + scale * (k * co - l * si) + 0.5f);
-    int yp = (int)(yf + scale * (k * si + l * co) + 0.5f);
-    int pos = yp * pitch + xp;
-    float im = imd[pos];
-    float dx = dxd[pos];
-    float dy = dyd[pos];
-    float rx = -dx * si + dy * co;
-    float ry = dx * co + dy * si;
-
-    if (m < 2 * size2) {
-      int x2 = (x < size2 ? 0 : 1);
-      int y2 = (y < size2 ? 0 : 1);
-      // atomicAdd(norm2, (x < size2 && y < size2 ? 1 : 0));
-      // Add 2x2
-      atomicAdd(&acc_vals[3 * (y2 * 2 + x2)], im);
-      atomicAdd(&acc_vals[3 * (y2 * 2 + x2) + 1], rx);
-      atomicAdd(&acc_vals[3 * (y2 * 2 + x2) + 2], ry);
-    }
-    if (m < 3 * size3) {
-      int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
-      int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
-      // atomicAdd(norm3, (x < size3 && y < size3 ? 1 : 0));
-      // Add 3x3
-      atomicAdd(&acc_vals[3 * (4 + y3 * 3 + x3)], im);
-      atomicAdd(&acc_vals[3 * (4 + y3 * 3 + x3) + 1], rx);
-      atomicAdd(&acc_vals[3 * (4 + y3 * 3 + x3) + 2], ry);
-    }
-    if (m < 4 * size4) {
-      int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
-      int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
-      // atomicAdd(norm4, (x < size4 && y < size4 ? 1 : 0));
-      // Add 4x4
-      atomicAdd(&acc_vals[3 * (4 + 9 + y4 * 4 + x4)], im);
-      atomicAdd(&acc_vals[3 * (4 + 9 + y4 * 4 + x4) + 1], rx);
-      atomicAdd(&acc_vals[3 * (4 + 9 + y4 * 4 + x4) + 2], ry);
-    }
-  }
-
-  __syncthreads();
-
-  // Have 29*3 values to store
-  // They are in acc_vals[0..28,64*30..64*30+28,64*60..64*60+28]
-  if (tx < 29) {
-    vals[tx] = acc_vals[tx];
-    vals[29 + tx] = acc_vals[29 + tx];
-    vals[2 * 29 + tx] = acc_vals[2 * 29 + tx];
-  }
-}
 
 __global__ void BuildDescriptor(float *_valsim, unsigned char *_desc) {
   int p = blockIdx.x;
@@ -1487,10 +1656,10 @@ __global__ void MatchDescriptors(unsigned char *d1, unsigned char *d2,
   //    }
 
   // curent version fixed with popc, still not convinced
-  unsigned long long *d1i = (unsigned long long*)(d1 + pitch*p);
+  unsigned long long *d1i = (unsigned long long *)(d1 + pitch * p);
 
   for (int i = 0; i < nkpts_2; i += NTHREADS_MATCH) {
-    unsigned long long *d2i = (unsigned long long*)(d2 + pitch*(x+i));
+    unsigned long long *d2i = (unsigned long long *)(d2 + pitch * (x + i));
     if (i + x < nkpts_2) {
       // Check d1[p] with d2[i]
       int score = 0;
@@ -1544,132 +1713,101 @@ __global__ void MatchDescriptors(unsigned char *d1, unsigned char *d2,
         idxSecondBest[x] = idxSecondBest[x + i];
       }
     }
-    }
-    // if(i>16) __syncthreads();
-    //        if(x<i) {
-    //            if( scoreBest[x+i] < scoreSecondBest[x] ) {
-    //                scoreSecondBest[x] = scoreBest[x+i];
-    //                idxSecondBest[x] = idxBest[x+i];
-    //            } else if (scoreSecondBest[x+i] < scoreSecondBest[x] ) {
-    //                scoreSecondBest[x] = scoreSecondBest[x+i];
-    //                idxSecondBest[x] = idxSecondBest[x+i];
-    //            }
-    //        }
-    //        if(i>16) __syncthreads();
-    //}
+  }
+  // if(i>16) __syncthreads();
+  //        if(x<i) {
+  //            if( scoreBest[x+i] < scoreSecondBest[x] ) {
+  //                scoreSecondBest[x] = scoreBest[x+i];
+  //                idxSecondBest[x] = idxBest[x+i];
+  //            } else if (scoreSecondBest[x+i] < scoreSecondBest[x] ) {
+  //                scoreSecondBest[x] = scoreSecondBest[x+i];
+  //                idxSecondBest[x] = idxSecondBest[x+i];
+  //            }
+  //        }
+  //        if(i>16) __syncthreads();
+  //}
 
-    /*for (int i = 1; i <= NTHREADS_MATCH; ++i) {
-      if (scoreBest[i] < scoreBest[0]) {
-        scoreSecondBest[0] = scoreBest[0];
-        scoreBest[0] = scoreBest[i];
-        idxSecondBest[0] = idxBest[0];
-        idxBest[0] = idxBest[i];
-      }  else if( scoreBest[i] < scoreSecondBest[0] ) {
-           scoreSecondBest[0] = scoreBest[i];
-           idxSecondBest[0] = idxBest[i];
-       }
-       if(scoreSecondBest[i] < scoreSecondBest[0]) {
-           scoreSecondBest[0] = scoreSecondBest[i];
-           idxSecondBest[0] = idxSecondBest[i];
-       }
-    }*/
+  /*for (int i = 1; i <= NTHREADS_MATCH; ++i) {
+    if (scoreBest[i] < scoreBest[0]) {
+      scoreSecondBest[0] = scoreBest[0];
+      scoreBest[0] = scoreBest[i];
+      idxSecondBest[0] = idxBest[0];
+      idxBest[0] = idxBest[i];
+    }  else if( scoreBest[i] < scoreSecondBest[0] ) {
+         scoreSecondBest[0] = scoreBest[i];
+         idxSecondBest[0] = idxBest[i];
+     }
+     if(scoreSecondBest[i] < scoreSecondBest[0]) {
+         scoreSecondBest[0] = scoreSecondBest[i];
+         idxSecondBest[0] = idxSecondBest[i];
+     }
+  }*/
 
-    //    if(x==0) {
-    //        matches[2*p].queryIdx = p;
-    //        matches[2*p].trainIdx = idxBest;
-    //        matches[2*p].distance = scoreBest;
-    //        matches[2*p+1].queryIdx = p;
-    //        matches[2*p+1].trainIdx = idxSecondBest;
-    //        matches[2*p+1].distance = scoreSecondBest;
-    //    }
+  //    if(x==0) {
+  //        matches[2*p].queryIdx = p;
+  //        matches[2*p].trainIdx = idxBest;
+  //        matches[2*p].distance = scoreBest;
+  //        matches[2*p+1].queryIdx = p;
+  //        matches[2*p+1].trainIdx = idxSecondBest;
+  //        matches[2*p+1].distance = scoreSecondBest;
+  //    }
 
-    if (x == 0) {
-      matches[2 * p].queryIdx = p;
-      matches[2 * p].trainIdx = idxBest[x];
-      matches[2 * p].distance = scoreBest[x];
-      matches[2 * p + 1].queryIdx = p;
-      matches[2 * p + 1].trainIdx = idxSecondBest[x];
-      matches[2 * p + 1].distance = scoreSecondBest[x];
-    }
+  if (x == 0) {
+    matches[2 * p].queryIdx = p;
+    matches[2 * p].trainIdx = idxBest[x];
+    matches[2 * p].distance = scoreBest[x];
+    matches[2 * p + 1].queryIdx = p;
+    matches[2 * p + 1].trainIdx = idxSecondBest[x];
+    matches[2 * p + 1].distance = scoreSecondBest[x];
+  }
+}
+
+
+void MatchDescriptors(cv::Mat &desc_query, cv::Mat &desc_train,
+                      std::vector<std::vector<cv::DMatch> > &dmatches) {
+  size_t pitch1, pitch2;
+  unsigned char *descq_d;
+  cudaMallocPitch(&descq_d, &pitch1, 64, desc_query.rows);
+  cudaMemset2D(descq_d, pitch1, 0, 64, desc_query.rows);
+  cudaMemcpy2D(descq_d, pitch1, desc_query.data, desc_query.cols,
+               desc_query.cols, desc_query.rows, cudaMemcpyHostToDevice);
+  unsigned char *desct_d;
+  cudaMallocPitch(&desct_d, &pitch2, 64, desc_train.rows);
+  cudaMemset2D(desct_d, pitch2, 0, 64, desc_train.rows);
+  cudaMemcpy2D(desct_d, pitch2, desc_train.data, desc_train.cols,
+               desc_train.cols, desc_train.rows, cudaMemcpyHostToDevice);
+
+  dim3 block(desc_query.rows);
+
+  cv::DMatch *dmatches_d;
+  cudaMalloc(&dmatches_d, desc_query.rows * 2 * sizeof(cv::DMatch));
+
+  MatchDescriptors << <block, NTHREADS_MATCH>>>
+      (descq_d, desct_d, pitch1, desc_train.rows, dmatches_d);
+
+  cv::DMatch *dmatches_h = new cv::DMatch[2 * desc_query.rows];
+  cudaMemcpy(dmatches_h, dmatches_d, desc_query.rows * 2 * sizeof(cv::DMatch),
+             cudaMemcpyDeviceToHost);
+
+  for (int i = 0; i < desc_query.rows; ++i) {
+    std::vector<cv::DMatch> tdmatch;
+    tdmatch.push_back(dmatches_h[2 * i]);
+    tdmatch.push_back(dmatches_h[2 * i + 1]);
+    dmatches.push_back(tdmatch);
   }
 
-  void MatchDescriptors(cv::Mat & desc_query, cv::Mat & desc_train,
-                        std::vector<std::vector<cv::DMatch> > & dmatches) {
-    size_t pitch1, pitch2;
-    unsigned char *descq_d;
-    cudaMallocPitch(&descq_d, &pitch1, 64, desc_query.rows);
-    cudaMemset2D(descq_d, pitch1, 0, 64, desc_query.rows);
-    cudaMemcpy2D(descq_d, pitch1, desc_query.data, desc_query.cols,
-                 desc_query.cols, desc_query.rows, cudaMemcpyHostToDevice);
-    unsigned char *desct_d;
-    cudaMallocPitch(&desct_d, &pitch2, 64, desc_train.rows);
-    cudaMemset2D(desct_d, pitch2, 0, 64, desc_train.rows);
-    cudaMemcpy2D(desct_d, pitch2, desc_train.data, desc_train.cols,
-                 desc_train.cols, desc_train.rows, cudaMemcpyHostToDevice);
+  cudaFree(descq_d);
+  cudaFree(desct_d);
+  cudaFree(dmatches_d);
 
-    dim3 block(desc_query.rows);
+  delete[] dmatches_h;
+}
 
-    cv::DMatch *dmatches_d;
-    cudaMalloc(&dmatches_d, desc_query.rows * 2 * sizeof(cv::DMatch));
 
-    MatchDescriptors << <block, NTHREADS_MATCH>>>
-        (descq_d, desct_d, pitch1, desc_train.rows, dmatches_d);
+void InitCompareIndices() {
 
-    cv::DMatch *dmatches_h = new cv::DMatch[2 * desc_query.rows];
-    cudaMemcpy(dmatches_h, dmatches_d, desc_query.rows * 2 * sizeof(cv::DMatch),
-               cudaMemcpyDeviceToHost);
-
-    for (int i = 0; i < desc_query.rows; ++i) {
-      std::vector<cv::DMatch> tdmatch;
-      tdmatch.push_back(dmatches_h[2 * i]);
-      tdmatch.push_back(dmatches_h[2 * i + 1]);
-      dmatches.push_back(tdmatch);
-    }
-
-    cudaFree(descq_d);
-    cudaFree(desct_d);
-    cudaFree(dmatches_d);
-
-    delete[] dmatches_h;
-  }
-
-  double ExtractDescriptors(std::vector<cv::KeyPoint> & h_pts,
-                            cv::KeyPoint * d_pts,
-                            std::vector<CudaImage> & h_imgs, CudaImage * d_imgs,
-                            unsigned char *desc_h, int patsize) {
-    int size2 = patsize;
-    int size3 = ceil(2.0f * patsize / 3.0f);
-    int size4 = ceil(0.5f * patsize);
-    int numPts = h_pts.size();
-
-    // TimerGPU timer0(0);
-    dim3 blocks(numPts);
-    dim3 threads(EXTRACT_S);
-
-    float *vals_h = new float[3 * 29 * numPts];
-    float *vals_d;
-    cudaMalloc(&vals_d, 3 * 29 * numPts * sizeof(float));
-
-    ExtractDescriptors << <blocks, threads>>>
-        (d_pts, d_imgs, vals_d, size2, size3, size4);
-
-//#define PRINT_KPT
-
-#ifdef PRINT_KPT
-    cudaMemcpy(vals_h, vals_d, 3 * 29 * numPts * sizeof(float),
-               cudaMemcpyDeviceToHost);
-
-    //  int xkpt = 865, ykpt = 30;
-    int xkpt = 840, ykpt = 45;
-
-    int idx = -1;
-    for (int i = 0; i < h_pts.size(); ++i) {
-      if ((int)h_pts[i].pt.x == xkpt && (int)h_pts[i].pt.y == ykpt) idx = i;
-    }
-#endif
-
-    static int comp_idx_1_h[61 * 8];
-    static int comp_idx_2_h[61 * 8];
+    int comp_idx_1_h[61 * 8];
+    int comp_idx_2_h[61 * 8];
 
     int cntr = 0;
     for (int j = 0; j < 4; ++j) {
@@ -1740,147 +1878,113 @@ __global__ void MatchDescriptors(unsigned char *d1, unsigned char *d2,
       }
     }
 
-    cudaMemcpyToSymbolAsync(comp_idx_1, comp_idx_1_h, 8 * 61 * sizeof(int));
-    cudaMemcpyToSymbolAsync(comp_idx_2, comp_idx_2_h, 8 * 61 * sizeof(int));
+    cudaMemcpyToSymbol(comp_idx_1, comp_idx_1_h, 8 * 61 * sizeof(int));
+    cudaMemcpyToSymbol(comp_idx_2, comp_idx_2_h, 8 * 61 * sizeof(int));
 
-    unsigned char *desc_d;
-    cudaMalloc(&desc_d, numPts * 61);
-    cudaMemsetAsync(desc_d, 0, numPts * 61);
-    BuildDescriptor << <blocks, 64>>> (vals_d, desc_d);
+}
 
-    cudaMemcpy(desc_h, desc_d, 61 * numPts, cudaMemcpyDeviceToHost);
-#ifdef PRINT_KPT
-    if (idx == -1)
-      std::cout << "GPU error:: keypoint not found! " << std::endl;
-    else {
-      float sum2 = 0, sum3 = 0, sum4 = 0;
-      for (int i = 0; i < 4; ++i) {
-        sum2 += vals_h[3 * 29 * idx + 3 * i];
-      }
-      for (int i = 0; i < 9; ++i) {
-        sum3 += vals_h[3 * 29 * idx + 12 + 3 * i];
-      }
-      for (int i = 0; i < 16; ++i) {
-        sum4 += vals_h[3 * 29 * idx + 39 + 3 * i];
-      }
 
-      std::cout << "sums: " << sum2 << " " << sum3 << " " << sum4 << std::endl;
+double ExtractDescriptors(cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, CudaImage *d_imgs,
+                          unsigned char *desc_d, float* vals_d, int patsize, int numPts) {
+  int size2 = patsize;
+  int size3 = ceil(2.0f * patsize / 3.0f);
+  int size4 = ceil(0.5f * patsize);
+  //int numPts;
+  //cudaMemcpyFromSymbol(&numPts, d_PointCounter, sizeof(int));
 
-      std::cout << "Keypoint idx: " << idx << std::endl;
+  std::cout << "building descripor for " << numPts << " points\n";
 
-      std::cout << "GPU output:\n";
-      std::cout << "2x2\n";
-      for (int i = 0; i < 12; ++i) {
-        std::cout << vals_h[3 * 29 * idx + i] << " ";
-      }
-      std::cout << std::endl;
-      std::cout << "3x3";
-      std::cout << std::endl;
-      for (int i = 12; i < 39; ++i) {
-        std::cout << vals_h[3 * 29 * idx + i] << " ";
-      }
-      std::cout << std::endl;
-      std::cout << "4x4";
-      std::cout << std::endl;
-      for (int i = 39; i < 3 * 29; ++i) {
-        std::cout << vals_h[3 * 29 * idx + i] << " ";
-      }
-      std::cout << std::endl;
-      std::cout << "descriptor\n";
-      std::cout << std::endl;
-      for (int i = 0; i < 61; ++i) {
-        std::cout << (unsigned int)desc_h[idx * 61 + i] << " ";
-      }
-      std::cout << "\n";
-    }
-#endif
+  // TimerGPU timer0(0);
+  dim3 blocks(numPts);
+  dim3 threads(EXTRACT_S);
 
-    ////checkMsg("ExtractDescriptors() execution failed\n");
-    // safeCall(cudaThreadSynchronize());
-    double gpuTime = 0;  // timer0.read();
+  ExtractDescriptors << <blocks, threads>>>(d_pts, d_imgs, vals_d, size2, size3, size4);
+
+
+  cudaMemsetAsync(desc_d, 0, numPts * 61);
+  BuildDescriptor << <blocks, 64>>> (vals_d, desc_d);
+
+
+  ////checkMsg("ExtractDescriptors() execution failed\n");
+  // safeCall(cudaThreadSynchronize());
+  double gpuTime = 0;  // timer0.read();
 #ifdef VERBOSE
-    printf("ExtractDescriptors time =     %.2f ms\n", gpuTime);
+  printf("ExtractDescriptors time =     %.2f ms\n", gpuTime);
 #endif
 
-    cudaFree(vals_d);
-    cudaFree(desc_d);
+  return gpuTime;
+}
 
-    delete[] vals_h;
-
-    return gpuTime;
+__global__ void FindOrientation(cv::KeyPoint *d_pts, CudaImage *d_imgs) {
+  __shared__ float resx[42], resy[42];
+  __shared__ float re8x[42], re8y[42];
+  int p = blockIdx.x;
+  int tx = threadIdx.x;
+  if (tx < 48) resx[tx] = resy[tx] = 0.0f;
+  __syncthreads();
+  int lev = d_pts[p].class_id;
+  float *dxd = d_imgs[4 * lev + 2].d_data;
+  float *dyd = d_imgs[4 * lev + 3].d_data;
+  int pitch = d_imgs[4 * lev + 0].pitch;
+  int octave = d_pts[p].octave;
+  int step = (int)(0.5f * d_pts[p].size + 0.5f) >> octave;
+  int x = (int)(d_pts[p].pt.x + 0.5f) >> octave;
+  int y = (int)(d_pts[p].pt.y + 0.5f) >> octave;
+  int i = (tx & 15) - 6;
+  int j = (tx / 16) - 6;
+  int r2 = i * i + j * j;
+  if (r2 < 36) {
+    float gweight = exp(-r2 / (2.5f * 2.5f * 2.0f));
+    int pos = (y + step * j) * pitch + (x + step * i);
+    float dx = gweight * dxd[pos];
+    float dy = gweight * dyd[pos];
+    float angle = atan2(dy, dx);
+    int a = max(min((int)(angle * (21 / CV_PI)) + 21, 41), 0);
+    atomicAdd(resx + a, dx);
+    atomicAdd(resy + a, dy);
   }
-
-  __global__ void FindOrientation(cv::KeyPoint * d_pts, CudaImage * d_imgs) {
-    __shared__ float resx[42], resy[42];
-    __shared__ float re8x[42], re8y[42];
-    int p = blockIdx.x;
-    int tx = threadIdx.x;
-    if (tx < 48) resx[tx] = resy[tx] = 0.0f;
-    __syncthreads();
-    int lev = d_pts[p].class_id;
-    float *dxd = d_imgs[4 * lev + 2].d_data;
-    float *dyd = d_imgs[4 * lev + 3].d_data;
-    int pitch = d_imgs[4 * lev + 0].pitch;
-    int octave = d_pts[p].octave;
-    int step = (int)(0.5f * d_pts[p].size + 0.5f) >> octave;
-    int x = (int)(d_pts[p].pt.x + 0.5f) >> octave;
-    int y = (int)(d_pts[p].pt.y + 0.5f) >> octave;
-    int i = (tx & 15) - 6;
-    int j = (tx / 16) - 6;
-    int r2 = i * i + j * j;
-    if (r2 < 36) {
-      float gweight = exp(-r2 / (2.5f * 2.5f * 2.0f));
-      int pos = (y + step * j) * pitch + (x + step * i);
-      float dx = gweight * dxd[pos];
-      float dy = gweight * dyd[pos];
-      float angle = atan2(dy, dx);
-      int a = max(min((int)(angle * (21 / CV_PI)) + 21, 41), 0);
-      atomicAdd(resx + a, dx);
-      atomicAdd(resy + a, dy);
-    }
-    __syncthreads();
-    if (tx < 42) {
-      re8x[tx] = resx[tx];
-      re8y[tx] = resy[tx];
-      for (int k = tx + 1; k < tx + 7; k++) {
-        re8x[tx] += resx[k < 42 ? k : k - 42];
-        re8y[tx] += resy[k < 42 ? k : k - 42];
-      }
-    }
-    __syncthreads();
-    if (tx == 0) {
-      float maxr = 0.0f;
-      int maxk = 0;
-      for (int k = 0; k < 42; k++) {
-        float r = re8x[k] * re8x[k] + re8y[k] * re8y[k];
-        if (r > maxr) {
-          maxr = r;
-          maxk = k;
-        }
-      }
-      float angle = atan2(re8y[maxk], re8x[maxk]);
-      d_pts[p].angle = (angle < 0.0f ? angle + 2.0f * CV_PI : angle);
-      // printf("XXX %.2f %.2f %.2f\n", d_pts[p].pt.x, d_pts[p].pt.y,
-      // d_pts[p].angle/CV_PI*180.0f);
+  __syncthreads();
+  if (tx < 42) {
+    re8x[tx] = resx[tx];
+    re8y[tx] = resy[tx];
+    for (int k = tx + 1; k < tx + 7; k++) {
+      re8x[tx] += resx[k < 42 ? k : k - 42];
+      re8y[tx] += resy[k < 42 ? k : k - 42];
     }
   }
+  __syncthreads();
+  if (tx == 0) {
+    float maxr = 0.0f;
+    int maxk = 0;
+    for (int k = 0; k < 42; k++) {
+      float r = re8x[k] * re8x[k] + re8y[k] * re8y[k];
+      if (r > maxr) {
+        maxr = r;
+        maxk = k;
+      }
+    }
+    float angle = atan2(re8y[maxk], re8x[maxk]);
+    d_pts[p].angle = (angle < 0.0f ? angle + 2.0f * CV_PI : angle);
+    // printf("XXX %.2f %.2f %.2f\n", d_pts[p].pt.x, d_pts[p].pt.y,
+    // d_pts[p].angle/CV_PI*180.0f);
+  }
+}
 
-  double FindOrientation(std::vector<cv::KeyPoint> & h_pts,
-                         cv::KeyPoint * d_pts, std::vector<CudaImage> & h_imgs,
-                         CudaImage * d_imgs) {
-    safeCall(cudaMemcpyAsync(d_imgs, (float *)&h_imgs[0],
-                             sizeof(CudaImage) * h_imgs.size(),
-                             cudaMemcpyHostToDevice));
-    int numPts = h_pts.size();
-    // TimerGPU timer0(0);
-    dim3 blocks(numPts);
-    dim3 threads(ORIENT_S);
-    FindOrientation << <blocks, threads>>> (d_pts, d_imgs);
-    // checkMsg("FindOrientation() execution failed\n");
-    // safeCall(cudaThreadSynchronize());
-    double gpuTime = 0;  // timer0.read();
+double FindOrientation(cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, CudaImage *d_imgs, int numPts) {
+
+  safeCall(cudaMemcpyAsync(d_imgs, (float *)&h_imgs[0],
+                           sizeof(CudaImage) * h_imgs.size(),
+                           cudaMemcpyHostToDevice));
+  // TimerGPU timer0(0);
+  cudaStreamSynchronize(0);
+  dim3 blocks(numPts);
+  dim3 threads(ORIENT_S);
+  FindOrientation << <blocks, threads>>> (d_pts, d_imgs);
+  // checkMsg("FindOrientation() execution failed\n");
+  // safeCall(cudaThreadSynchronize());
+  double gpuTime = 0;  // timer0.read();
 #ifdef VERBOSE
-    printf("FindOrientation time =        %.2f ms\n", gpuTime);
+  printf("FindOrientation time =        %.2f ms\n", gpuTime);
 #endif
-    return gpuTime;
-  }
+  return gpuTime;
+}

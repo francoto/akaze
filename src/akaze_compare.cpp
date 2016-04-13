@@ -28,6 +28,7 @@
 #include <opencv2/highgui/highgui.hpp>
 
 using namespace std;
+using namespace libAKAZECU;
 
 /* ************************************************************************* */
 // ORB settings
@@ -265,11 +266,11 @@ int main(int argc, char *argv[]) {
   //*******************
   options.img_width = img1.cols;
   options.img_height = img1.rows;
-  libAKAZE::AKAZE evolution1(options);
+  AKAZE evolution1(options);
 
   options.img_width = img2.cols;
   options.img_height = img2.rows;
-  libAKAZE::AKAZE evolution2(options);
+  AKAZE evolution2(options);
 
   t1 = cv::getTickCount();
 

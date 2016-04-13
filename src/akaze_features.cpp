@@ -30,6 +30,7 @@
 #include <cuda_profiler_api.h>
 
 using namespace std;
+using namespace libAKAZECU;
 
 /* ************************************************************************* */
 /**
@@ -76,26 +77,11 @@ int main(int argc, char* argv[]) {
   options.img_height = img.rows;
 
   // Extract features
-  libAKAZE::AKAZE evolution(options);
+  AKAZE evolution(options);
   vector<cv::KeyPoint> kpts;
 
-  int a[100000], b[100000];
+  cudaProfilerStart();
 
-  for (int j = 0; j < 100; ++j) {
-#pragma omp parallel for
-    for (int i = 0; i < 1000; ++i) {
-      a[i] = i;
-      b[i] = 2 * i;
-    }
-  }
-
-  int ss = 0;
-  for (int i = 0; i < 1000; ++i) {
-    ss += a[i] + b[i];
-  }
-  std::cout << "sum: " << ss << std::endl;
-
-  //  for( int i=0; i<10; ++i) {
   t1 = cv::getTickCount();
   evolution.Create_Nonlinear_Scale_Space(img_32);
   evolution.Feature_Detection(kpts);
@@ -109,6 +95,14 @@ int main(int argc, char* argv[]) {
   t2 = cv::getTickCount();
   tdesc = 1000.0 * (t2 - t1) / cv::getTickFrequency();
 
+  for (int i=0; i<kpts.size(); ++i) {
+      cv::KeyPoint &pt = kpts[i];
+      if (pt.size < 0)
+          std::cout << pt.pt.y << " " << pt.pt.x << std::endl;
+  }
+
+  cudaProfilerStop();
+
   std::vector<std::vector<cv::DMatch> > dmatches;
   MatchDescriptors(desc, desc, dmatches);
 
@@ -121,7 +115,6 @@ int main(int argc, char* argv[]) {
 
   matcher_l1->knnMatch(desc, desc, cv_matches, 2);
 
-  cudaProfilerStop();
 
 /*  vector<int> fst_errs;
   vector<int> scd_errs;
@@ -182,13 +175,13 @@ int main(int argc, char* argv[]) {
     cout << "Time Detector: " << tdet << " ms" << endl;
     cout << "Time Descriptor: " << tdesc << " ms" << endl;
 
-    /*cv::Mat img_rgb = cv::Mat(cv::Size(img.cols, img.rows), CV_8UC3);
+    cv::Mat img_rgb = cv::Mat(cv::Size(img.cols, img.rows), CV_8UC3);
     cvtColor(img,img_rgb, cv::COLOR_GRAY2BGR);
     draw_keypoints(img_rgb, kpts);
 
     cv::namedWindow("A-KAZE", cv::WINDOW_AUTOSIZE);
     cv::imshow("A-KAZE", img_rgb);
-    cv::waitKey(0);*/
+    cv::waitKey(0);
   }
 
   // Save keypoints in ASCII format

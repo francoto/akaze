@@ -37,7 +37,6 @@ if(OPENMP_FOUND)
     endif(UNIX)
 endif(OPENMP_FOUND)
 
-SET(CUDASIFT /Users/niklas/Documents/dev/src/CudaSift)
 
 # ============================================================================ #
 # Create projects
@@ -55,7 +54,7 @@ add_library(AKAZE ${AKAZE_SRCS})
 target_link_libraries(AKAZE ${OpenCV_LIBS})
 
 SET(AKAZE_CUDA_SRCS
-  ${CUDASIFT}/cudaImage.cu lib/cuda_akaze.cu)
+  lib/cudaImage.cu lib/cuda_akaze.cu)
 
 SET(CUDA_SEPARABLE_COMPILATION ON)
 

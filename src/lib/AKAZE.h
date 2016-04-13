@@ -20,7 +20,7 @@
 #include <opencv2/features2d/features2d.hpp>
 
 /* ************************************************************************* */
-namespace libAKAZE {
+namespace libAKAZECU {
 
   class AKAZE {
 
@@ -46,8 +46,13 @@ namespace libAKAZE {
     /// CUDA memory buffers
     float *cuda_memory;
     cv::KeyPoint *cuda_points;
+    cv::KeyPoint *cuda_bufferpoints;
+    cv::Mat cuda_desc;
+    float* cuda_descbuffer;
+    short* cuda_ptindices;
     CudaImage *cuda_images;
     std::vector<CudaImage> cuda_buffers;
+    int nump;
 
   public:
 
@@ -87,80 +92,6 @@ namespace libAKAZE {
     /// Feature description methods
     void Compute_Descriptors(std::vector<cv::KeyPoint>& kpts, cv::Mat& desc);
 
-    /// This method computes the main orientation for a given keypoint
-    /// @param kpt Input keypoint
-    /// @note The orientation is computed using a similar approach as described in the original SURF method.
-    /// See Bay et al., Speeded Up Robust Features, ECCV 2006.
-    /// A-KAZE uses first order derivatives computed from the nonlinear scale space in contrast to Haar wavelets
-    void Compute_Main_Orientation(cv::KeyPoint& kpt) const;
-
-    /// Compute the upright descriptor (not rotation invariant) for the provided keypoint using a
-    /// rectangular grid similar as the one used in SURF
-    /// @param kpt Input keypoint
-    /// @param desc Floating-based descriptor
-    /// @note Rectangular grid of 20 s x 20 s. Descriptor Length 64. No additional
-    /// Gaussian weighting is performed. The descriptor is inspired from Bay et al.,
-    /// Speeded Up Robust Features, ECCV, 2006
-    void Get_SURF_Descriptor_Upright_64(const cv::KeyPoint& kpt, float* desc) const;
-
-    /// Compute the rotation invariant descriptor for the provided keypoint using a
-    /// rectangular grid similar as the one used in SURF
-    /// @param kpt Input keypoint
-    /// @param desc Floating-based descriptor
-    /// @note Rectangular grid of 20 s x 20 s. Descriptor Length 64. No additional
-    /// Gaussian weighting is performed. The descriptor is inspired from Bay et al.,
-    /// Speeded Up Robust Features, ECCV, 2006
-    void Get_SURF_Descriptor_64(const cv::KeyPoint& kpt, float* desc) const;
-
-    /// Compute the upright descriptor (not rotation invariant) for the provided keypoint using a
-    /// rectangular grid similar as the one used in M-SURF
-    /// @param kpt Input keypoint
-    /// @param desc Floating-based descriptor
-    /// @note Rectangular grid of 24 s x 24 s. Descriptor Length 64. The descriptor is inspired
-    /// from Agrawal et al., CenSurE: Center Surround Extremas for Realtime Feature Detection and Matching,
-    /// ECCV 2008
-    void Get_MSURF_Upright_Descriptor_64(const cv::KeyPoint& kpt, float* desc) const;
-
-    /// Compute the rotation invariant descriptor for the provided keypoint using a
-    /// rectangular grid similar as the one used in M-SURF
-    /// @param kpt Input keypoint
-    /// @param desc Floating-based descriptor
-    /// @note Rectangular grid of 24 s x 24 s. Descriptor Length 64. The descriptor is inspired
-    /// from Agrawal et al., CenSurE: Center Surround Extremas for Realtime Feature Detection and Matching,
-    /// ECCV 2008
-    void Get_MSURF_Descriptor_64(const cv::KeyPoint& kpt, float* desc) const;
-
-    /// Compute the upright (not rotation invariant) M-LDB binary descriptor (maximum descriptor length)
-    /// @param kpt Input keypoint
-    /// @param desc Binary-based descriptor
-    void Get_Upright_MLDB_Full_Descriptor(const cv::KeyPoint& kpt, unsigned char* desc) const;
-
-    /// Computes the rotation invariant M-LDB binary descriptor (maximum descriptor length)
-    /// @param kpt Input keypoint
-    /// @param desc Binary-based descriptor
-    void Get_MLDB_Full_Descriptor(const cv::KeyPoint& kpt, unsigned char* desc) const;
-
-    /// Compute the upright (not rotation invariant) M-LDB binary descriptor (specified descriptor length)
-    /// @param kpt Input keypoint
-    /// @param desc Binary-based descriptor
-    void Get_Upright_MLDB_Descriptor_Subset(const cv::KeyPoint& kpt, unsigned char* desc);
-
-    /// Computes the rotation invariant M-LDB binary descriptor (specified descriptor length)
-    /// @param kpt Input keypoint
-    /// @param desc Binary-based descriptor
-    void Get_MLDB_Descriptor_Subset(const cv::KeyPoint& kpt, unsigned char* desc);
-
-    /// Fill the comparison values for the MLDB rotation invariant descriptor
-    void MLDB_Fill_Values(float* values, int sample_step, int level,
-                          float xf, float yf, float co, float si, float scale) const;
-
-    /// Fill the comparison values for the MLDB upright descriptor
-    void MLDB_Fill_Upright_Values(float* values, int sample_step, int level,
-                                  float xf, float yf, float scale) const;
-
-    /// Do the binary comparisons to obtain the descriptor
-    void MLDB_Binary_Comparisons(float* values, unsigned char* desc, int count, int& dpos) const;
-
     /// This method saves the scale space into jpg images
     void Save_Scale_Space();
 
@@ -180,6 +111,7 @@ namespace libAKAZE {
 
   /// This function sets default parameters for the A-KAZE detector
   void setDefaultAKAZEOptions(AKAZEOptions& options);
+
 
 
   /// This function computes a (quasi-random) list of bits to be taken
