@@ -2,7 +2,7 @@
 
 This is a fork of libAKAZE with modifications to run it on the GPU using CUDA
 
-The interface should be the same. Keypoins and descriptors are returned on the CPU for later matching etc. using e.g. OpenCV. We also provide a rudimentary brute force matcher running on the GPU.
+The interface is the same as the original version. Just changing namespace from libAKAZE to libAKAZECU should be enough. Keypoins and descriptors are returned on the CPU for later matching etc. using e.g. OpenCV. We also provide a rudimentary brute force matcher running on the GPU.
 
 Currently the code runs in legacy mode, generating the same results as the CPU code. In a future update, by changing a flag, a faster version can be used. On a 16 core Xeon with a Titan X card the (average) timing looks roughly as below:
 
@@ -11,6 +11,8 @@ Currently the code runs in legacy mode, generating the same results as the CPU c
 | Detection     |      117      |    6.5    |
 | Descriptor    |      10       |    0.9    |
 
+
+Note that the CUDA version has limitations. Currently the maximum number of detected keypoints is 8192, and the maximum number per level is 2048. This constraint might be relatex in future updates. 
 
 ---
 
