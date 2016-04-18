@@ -752,6 +752,8 @@ __global__ void FindExtrema(float *imd, float *imp, float *imn, int maxx,
       point.pt.x = ratio * (x);
       point.pt.y = ratio * (y);
       point.angle = dst1;
+    } else {
+        atomicAdd(d_PointCounter,-1);
     }
   }
 }
@@ -952,6 +954,7 @@ __global__ void FindNeighbors(cv::KeyPoint *pts, short *kptindices, int width) {
   }
 }
 
+// TODO Intermediate storage of memberarray and minneighbor
 #define FilterExtremaThreads 1024
 __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
                               short *kptindices, int width) {
@@ -959,8 +962,9 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
   // -2  means added but replaced
   // >=0 means added
   __shared__ short memberarray[8 * 1024];
+  // 8192 means have no neighbor
   __shared__ short minneighbor[8 * 1024];
-
+  // Indicates if we should add the neighbor
   __shared__ char shouldAdd[8 * 1024];
 
   __shared__ bool shouldBreak[1];
@@ -968,6 +972,7 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
 
   int nump = d_PointCounter[0];
 
+  // Initially all points are unprocessed
   for (int i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
     memberarray[i] = -1;
   }
@@ -979,14 +984,25 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
 
   __syncthreads();
 
+  // Loop until there are no more points to process
   while (true) {
-    // Loop all points
+
+      // Outer loop to handle more than 8*1024 points
+      // Start by restoring memberarray
+      // Make sure to add appropriate offset to indices
+      // for (int offset=0; offset<nump; offset += 8*1024) {
+        // memberarray[i] = storedmemberarray[i+offset];
+
+    // Mark all points for addition and no minimum neighbor
     for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
-      minneighbor[i] = 5001;
+      minneighbor[i] = 8*1024;
       shouldAdd[i] = true;
     }
     __syncthreads();
 
+    // Look through all points. If there are points that have not been processed,
+    // disable breaking and check if it has no processed neighbors (add), has all processed
+    // neighbors (compare with neighbors) or has some unprocessed neighbor (wait)
     for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
       int neighborsSize = kptindices[i * width] - 1;
       short *neighbors = &(kptindices[i * width + 1]);
@@ -1017,7 +1033,7 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
 
         // We should process and potentially replace the neighbor
         if (shouldProcess && !shouldAdd[i]) {
-          // Find the smallest neighbor
+          // Find the smallest neighbor. Often only one or two, so no ned for fancy algorithm
           for (int k = 0; k < neighborsSize; ++k) {
             for (int j = k + 1; j < neighborsSize; ++j) {
               if (memberarray[neighbors[k]] == -2 ||
@@ -1039,8 +1055,8 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
         }
       }
     }
-
     __syncthreads();
+
     // Check which points we can add
     for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
       if (memberarray[i] == -1) {
@@ -1049,11 +1065,11 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
         }
       }
     }
-
     __syncthreads();
-    // Look at the neighbors. If
+
+    // Look at the neighbors. If the response is higher, replace
     for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
-      if (minneighbor[i] != 5001) {
+      if (minneighbor[i] != 8*1024) {
         if (memberarray[minneighbor[i]] == -1) {
           if (!shouldAdd[minneighbor[i]]) {
             const cv::KeyPoint &p0 = kpts[minneighbor[i]];
@@ -1068,8 +1084,11 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
         }
       }
     }
-
     __syncthreads();
+
+    // End outer loop
+    // storedmemberarray[i+offset] = memberarray[i];
+    // }
 
     // Are we done?
     if (shouldBreak[0]) break;
@@ -1078,6 +1097,7 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
       shouldBreak[0] = true;
     }
     __syncthreads();
+
   }
 
   __syncthreads();
@@ -1168,11 +1188,14 @@ void FilterExtrema(cv::KeyPoint *pts, cv::KeyPoint *newpts, short* kptindices, i
   dim3 threads(BitonicSortThreads, 1, 1);
   bitonicSort << <blocks, threads>>> (pts, newpts);
 
+  std::cout << "sorted points\n";
   // Find all neighbors
   cudaStreamSynchronize(copyStream);
   blocks.x = nump;
   threads.x = FindNeighborsThreads;
   FindNeighbors << <blocks, threads>>> (newpts, kptindices, width);
+
+  std::cout << "Found neighbors\n";
 
   // Filter extrema
   blocks.x = 1;
@@ -1971,6 +1994,8 @@ __global__ void FindOrientation(cv::KeyPoint *d_pts, CudaImage *d_imgs) {
 }
 
 double FindOrientation(cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, CudaImage *d_imgs, int numPts) {
+
+    std::cout << "numpts: " << numPts << std::endl;
 
   safeCall(cudaMemcpyAsync(d_imgs, (float *)&h_imgs[0],
                            sizeof(CudaImage) * h_imgs.size(),
