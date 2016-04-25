@@ -82,23 +82,22 @@ int main(int argc, char* argv[]) {
 
   cudaProfilerStart();
 
-  t1 = cv::getTickCount();
-  evolution.Create_Nonlinear_Scale_Space(img_32);
-  evolution.Feature_Detection(kpts);
-  t2 = cv::getTickCount();
-  tdet = 1000.0 * (t2 - t1) / cv::getTickFrequency();
-
-  // Compute descriptors.
   cv::Mat desc;
-  t1 = cv::getTickCount();
-  evolution.Compute_Descriptors(kpts, desc);
-  t2 = cv::getTickCount();
-  tdesc = 1000.0 * (t2 - t1) / cv::getTickFrequency();
+  for (int k = 0; k < 1; ++k) {
+    t1 = cv::getTickCount();
+    evolution.Create_Nonlinear_Scale_Space(img_32);
+    evolution.Feature_Detection(kpts);
+    t2 = cv::getTickCount();
+    tdet = 1000.0 * (t2 - t1) / cv::getTickFrequency();
 
-  for (int i=0; i<kpts.size(); ++i) {
-      cv::KeyPoint &pt = kpts[i];
-      if (pt.size < 0)
-          std::cout << pt.pt.y << " " << pt.pt.x << std::endl;
+    // Compute descriptors.
+    t1 = cv::getTickCount();
+    evolution.Compute_Descriptors(kpts, desc);
+    t2 = cv::getTickCount();
+    tdesc = 1000.0 * (t2 - t1) / cv::getTickFrequency();
+
+    cout << "Time Detector: " << tdet << " ms" << endl;
+    cout << "Time Descriptor: " << tdesc << " ms" << endl << endl;
   }
 
   cudaProfilerStop();
@@ -115,57 +114,63 @@ int main(int argc, char* argv[]) {
 
   matcher_l1->knnMatch(desc, desc, cv_matches, 2);
 
+  /*  vector<int> fst_errs;
+    vector<int> scd_errs;
 
-/*  vector<int> fst_errs;
-  vector<int> scd_errs;
+    for (int i = 0; i < dmatches.size(); ++i) {
+      if (dmatches[i][0].trainIdx != cv_matches[i][0].trainIdx ||
+          dmatches[i][0].queryIdx != cv_matches[i][0].queryIdx ||
+          dmatches[i][0].distance != cv_matches[i][0].distance) {
+        fst_errs.push_back(i);
 
-  for (int i = 0; i < dmatches.size(); ++i) {
-    if (dmatches[i][0].trainIdx != cv_matches[i][0].trainIdx ||
-        dmatches[i][0].queryIdx != cv_matches[i][0].queryIdx ||
-        dmatches[i][0].distance != cv_matches[i][0].distance) {
-      fst_errs.push_back(i);
-
-      std::cout << "cuda " << dmatches[i][0].trainIdx << " "
-                << dmatches[i][0].queryIdx << " " << dmatches[i][0].distance
-                << " " << dmatches[i][1].trainIdx << " "
-                << dmatches[i][1].queryIdx << " " << dmatches[i][1].distance
-                << "\n"
-                << "cv " << cv_matches[i][0].trainIdx << " "
-                << cv_matches[i][0].queryIdx << " " << cv_matches[i][0].distance
-                << " " << cv_matches[i][1].trainIdx << " "
-                << cv_matches[i][1].queryIdx << " " << cv_matches[i][1].distance
-                << " first \n";
-    }
-    else if( dmatches[i][1].trainIdx != cv_matches[i][1].trainIdx ||
-            dmatches[i][1].queryIdx != cv_matches[i][1].queryIdx ||
-            dmatches[i][1].distance != cv_matches[i][1].distance)
-    {
-        scd_errs.push_back(i);
         std::cout << "cuda " << dmatches[i][0].trainIdx << " "
                   << dmatches[i][0].queryIdx << " " << dmatches[i][0].distance
                   << " " << dmatches[i][1].trainIdx << " "
                   << dmatches[i][1].queryIdx << " " << dmatches[i][1].distance
                   << "\n"
                   << "cv " << cv_matches[i][0].trainIdx << " "
-                  << cv_matches[i][0].queryIdx << " " << cv_matches[i][0].distance
+                  << cv_matches[i][0].queryIdx << " " <<
+    cv_matches[i][0].distance
                   << " " << cv_matches[i][1].trainIdx << " "
-                  << cv_matches[i][1].queryIdx << " " << cv_matches[i][1].distance
-                  << " second \n";
+                  << cv_matches[i][1].queryIdx << " " <<
+    cv_matches[i][1].distance
+                  << " first \n";
+      }
+      else if( dmatches[i][1].trainIdx != cv_matches[i][1].trainIdx ||
+              dmatches[i][1].queryIdx != cv_matches[i][1].queryIdx ||
+              dmatches[i][1].distance != cv_matches[i][1].distance)
+      {
+          scd_errs.push_back(i);
+          std::cout << "cuda " << dmatches[i][0].trainIdx << " "
+                    << dmatches[i][0].queryIdx << " " << dmatches[i][0].distance
+                    << " " << dmatches[i][1].trainIdx << " "
+                    << dmatches[i][1].queryIdx << " " << dmatches[i][1].distance
+                    << "\n"
+                    << "cv " << cv_matches[i][0].trainIdx << " "
+                    << cv_matches[i][0].queryIdx << " " <<
+    cv_matches[i][0].distance
+                    << " " << cv_matches[i][1].trainIdx << " "
+                    << cv_matches[i][1].queryIdx << " " <<
+    cv_matches[i][1].distance
+                    << " second \n";
+      }
     }
-  }
 
-  int fst_count = fst_errs.size();
-  int scd_count = scd_errs.size();
+    int fst_count = fst_errs.size();
+    int scd_count = scd_errs.size();
 
-  std::cout << "Total num of errors best " << fst_count << " errors second " << scd_count << "\n" << std::endl;
+    std::cout << "Total num of errors best " << fst_count << " errors second "
+    << scd_count << "\n" << std::endl;
 
-  for (int j = 0; j < desc.cols; ++j) {
-    std::cout << static_cast<int>(
-                     desc.at<uchar>(dmatches[fst_errs[fst_count-1]][0].trainIdx, j))
-              << "," << static_cast<int>(desc.at<uchar>(
-                            dmatches[fst_errs[fst_count-1]][0].queryIdx, j)) << " ";
-  }
-  std::cout << "\n";*/
+    for (int j = 0; j < desc.cols; ++j) {
+      std::cout << static_cast<int>(
+                       desc.at<uchar>(dmatches[fst_errs[fst_count-1]][0].trainIdx,
+    j))
+                << "," << static_cast<int>(desc.at<uchar>(
+                              dmatches[fst_errs[fst_count-1]][0].queryIdx, j))
+    << " ";
+    }
+    std::cout << "\n";*/
 
   if (true) {
     // Summarize the computation times.
@@ -176,7 +181,7 @@ int main(int argc, char* argv[]) {
     cout << "Time Descriptor: " << tdesc << " ms" << endl;
 
     cv::Mat img_rgb = cv::Mat(cv::Size(img.cols, img.rows), CV_8UC3);
-    cvtColor(img,img_rgb, cv::COLOR_GRAY2BGR);
+    cvtColor(img, img_rgb, cv::COLOR_GRAY2BGR);
     draw_keypoints(img_rgb, kpts);
 
     cv::namedWindow("A-KAZE", cv::WINDOW_AUTOSIZE);

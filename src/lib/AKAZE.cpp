@@ -21,7 +21,7 @@
  */
 
 #include "AKAZE.h"
-#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/highgui.hpp>
 #include <cstdio>  //%%%%
 
 using namespace std;
@@ -94,7 +94,7 @@ void AKAZE::Allocate_Memory_Evolution() {
     vector<float> tau;
     float ttime = 0.0;
     ttime = evolution_[i].etime - evolution_[i - 1].etime;
-    float tmax = 0.25;// * (1 << 2 * evolution_[i].octave);
+    float tmax = 0.25 * (1 << 2 * evolution_[i].octave);
     naux = fed_tau_by_process_time(ttime, 1, tmax, reordering_, tau);
     nsteps_.push_back(naux);
     tsteps_.push_back(tau);
@@ -109,7 +109,6 @@ void AKAZE::Allocate_Memory_Evolution() {
       options_.omax, options_.maxkeypoints, cuda_buffers, cuda_bufferpoints,
       cuda_points, cuda_ptindices, _cuda_desc, cuda_descbuffer, cuda_images);
   cuda_desc = cv::Mat(options_.maxkeypoints, 61, CV_8U, _cuda_desc);
-
 }
 
 /* ************************************************************************* */
@@ -165,11 +164,25 @@ int AKAZE::Create_Nonlinear_Scale_Space(const cv::Mat& img) {
     LowPass(Lt, Lsmooth, Lstep, 1.0, 5);
     Flow(Lsmooth, Lflow, options_.diffusivity, options_.kcontrast);
 
+    int iterLeft = nsteps_[i - 1];
+    float* stepsize = new float[iterLeft];
     for (int j = 0; j < nsteps_[i - 1]; j++) {
-        float stepsize = tsteps_[i - 1][j] / (1 << 2 * evn.octave);
-        // NLDStep(Lt, Lflow, Lstep, stepsize);
-        NLDStep(Lt, Lflow, Lstep, tsteps_[i - 1][j]);
+        stepsize[j] = tsteps_[i - 1][j] / (1 << 2 * evn.octave);
     }
+    for (int j = 0; j < nsteps_[i - 1];) {
+        const int maxstep = 2;
+      if (iterLeft >= maxstep) {
+        NLDStep<maxstep>(Lt, Lflow, Lstep, &stepsize[j]);
+        j += maxstep;
+        iterLeft -= maxstep;
+      }
+      else {
+        NLDStep<1>(Lt, Lflow, Lstep, &stepsize[j]);
+        j += 1;
+      }
+    }
+
+    delete [] stepsize;
 
     Lt.h_data = (float*)evn.Lt.data;
   }
@@ -237,9 +250,6 @@ void AKAZE::Feature_Detection(std::vector<cv::KeyPoint>& kpts) {
 
   FilterExtrema(cuda_points, cuda_bufferpoints, cuda_ptindices, nump);
 
-  //GetPoints(kpts, cuda_points);
-
-
   double t3 = cv::getTickCount();
   timing_.extrema = 1000.0 * (t3 - t2) / cv::getTickFrequency();
   timing_.detector = 1000.0 * (t3 - t1) / cv::getTickFrequency();
@@ -279,8 +289,8 @@ void AKAZE::Compute_Descriptors(std::vector<cv::KeyPoint>& kpts,
     case MLDB:
       FindOrientation(cuda_points, cuda_buffers, cuda_images, nump);
       GetPoints(kpts, cuda_points, nump);
-      ExtractDescriptors(cuda_points, cuda_buffers, cuda_images,
-                         cuda_desc.data, cuda_descbuffer, pattern_size, nump);
+      ExtractDescriptors(cuda_points, cuda_buffers, cuda_images, cuda_desc.data,
+                         cuda_descbuffer, pattern_size, nump);
       GetDescriptors(desc, cuda_desc, nump);
 
       break;
@@ -298,12 +308,11 @@ void AKAZE::Compute_Descriptors(std::vector<cv::KeyPoint>& kpts,
   WaitCuda();
 }
 
-
 /* ************************************************************************* */
 void AKAZE::Save_Scale_Space() {
   cv::Mat img_aux;
   string outputFile;
-    // TODO Readback and save
+  // TODO Readback and save
   for (size_t i = 0; i < evolution_.size(); i++) {
     convert_scale(evolution_[i].Lt);
     evolution_[i].Lt.convertTo(img_aux, CV_8U, 255.0, 0);

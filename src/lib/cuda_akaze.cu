@@ -2,6 +2,8 @@
 #include "cuda_akaze.h"
 #include "cudautils.h"
 
+#include <cuda_fp16.h>
+
 #define CONVROW_W 160
 #define CONVCOL_W 32
 #define CONVCOL_H 40
@@ -25,11 +27,7 @@ __device__ __constant__ int comp_idx_2[61 * 8];
 
 cudaStream_t copyStream;
 
-//__device__ __constant__ float norm_factors[29];
-
-void WaitCuda() {
-    cudaStreamSynchronize(copyStream);
-}
+void WaitCuda() { cudaStreamSynchronize(copyStream); }
 
 struct Conv_t {
   float *d_Result;
@@ -41,8 +39,6 @@ struct Conv_t {
 
 template <int RADIUS>
 __global__ void ConvRowGPU(struct Conv_t s) {
-  //__global__ void ConvRowGPU(float *d_Result, float *d_Data, int width, int
-  //pitch, int height) {
   __shared__ float data[CONVROW_W + 2 * RADIUS];
   const int tx = threadIdx.x;
   const int minx = blockIdx.x * CONVROW_W;
@@ -70,8 +66,6 @@ __global__ void ConvRowGPU(struct Conv_t s) {
 ///////////////////////////////////////////////////////////////////////////////
 template <int RADIUS>
 __global__ void ConvColGPU(struct Conv_t s) {
-  //__global__ void ConvColGPU(float *d_Result, float *d_Data, int width, int
-  //pitch, int height) {
   __shared__ float data[CONVCOL_W * (CONVCOL_H + 2 * RADIUS)];
   const int tx = threadIdx.x;
   const int ty = threadIdx.y;
@@ -222,7 +216,73 @@ double Scharr(CudaImage &img, CudaImage &lx, CudaImage &ly) {
   return gpuTime;
 }
 
-__global__ void Flow(float *imgd, float *flowd, int width, int pitch,
+
+struct Flow_t {
+    float *imgd;
+    float *flowd;
+    int width;
+    int pitch;
+    int height;
+    DIFFUSIVITY_TYPE type;
+    float invk;
+};
+
+__global__ void Flow(Flow_t s) {
+#define BW (SCHARR_W + 2)
+  __shared__ float buffer[BW * (SCHARR_H + 2)];
+  int tx = threadIdx.x;
+  int ty = threadIdx.y;
+  int x = blockIdx.x * SCHARR_W + tx;
+  int y = blockIdx.y * SCHARR_H + ty;
+  int xp = (x == 0 ? 1 : (x > s.width ? s.width - 2 : x - 1));
+  int yp = (y == 0 ? 1 : (y > s.height ? s.height - 2 : y - 1));
+  buffer[ty * BW + tx] = s.imgd[yp * s.pitch + xp];
+  __syncthreads();
+  if (x < s.width && y < s.height && tx < SCHARR_W && ty < SCHARR_H) {
+    float *b = buffer + (ty + 1) * BW + (tx + 1);
+    float ul = b[-BW - 1];
+    float ur = b[-BW + 1];
+    float ll = b[+BW - 1];
+    float lr = b[+BW + 1];
+    float lx = 3.0f * (lr - ll + ur - ul) + 10.0f * (b[+1] - b[-1]);
+    float ly = 3.0f * (lr + ll - ur - ul) + 10.0f * (b[BW] - b[-BW]);
+    float dif2 = s.invk * (lx * lx + ly * ly);
+    if (s.type == PM_G1)
+      s.flowd[y * s.pitch + x] = exp(-dif2);
+    else if (s.type == PM_G2)
+      s.flowd[y * s.pitch + x] = 1.0f / (1.0f + dif2);
+    else if (s.type == WEICKERT)
+      s.flowd[y * s.pitch + x] = 1.0f - exp(-3.315 / (dif2 * dif2 * dif2 * dif2));
+    else
+      s.flowd[y * s.pitch + x] = 1.0f / sqrt(1.0f + dif2);
+  }
+}
+
+double Flow(CudaImage &img, CudaImage &flow, DIFFUSIVITY_TYPE type,
+            float kcontrast) {
+  // TimerGPU timer0(0);
+  dim3 blocks(iDivUp(img.width, SCHARR_W), iDivUp(img.height, SCHARR_H));
+  dim3 threads(SCHARR_W + 2, SCHARR_H + 2);
+  Flow_t s;
+  s.imgd = img.d_data;
+  s.flowd = flow.d_data;
+  s.width = img.width;
+  s.pitch = img.pitch;
+  s.height = img.height;
+  s.type = type;
+  s.invk = 1.0f / (kcontrast * kcontrast);
+  Flow << <blocks, threads>>> (s);
+  // checkMsg("Flow() execution failed\n");
+  // safeCall(cudaThreadSynchronize());
+  double gpuTime = 0;  // = timer0.read();
+#ifdef VERBOSE
+  printf("Flow time =                   %.2f ms\n", gpuTime);
+#endif
+  return gpuTime;
+}
+
+
+/*__global__ void Flow(float *imgd, float *flowd, int width, int pitch,
                      int height, DIFFUSIVITY_TYPE type, float invk) {
 #define BW (SCHARR_W + 2)
   __shared__ float buffer[BW * (SCHARR_H + 2)];
@@ -269,7 +329,7 @@ double Flow(CudaImage &img, CudaImage &flow, DIFFUSIVITY_TYPE type,
   printf("Flow time =                   %.2f ms\n", gpuTime);
 #endif
   return gpuTime;
-}
+}*/
 
 struct NLDStep_t {
   float *imgd;
@@ -278,11 +338,51 @@ struct NLDStep_t {
   int width;
   int pitch;
   int height;
-  float stepsize;
+  float stepsize[2];
 };
 
-//__global__ void NLDStep(float *imgd, float *flod, float *temd, int width, int
-// pitch, int height, float stepsize)
+template <int N>
+__global__ void NLDStepMulti(NLDStep_t s) {
+#undef BW
+  const size_t BW(NLDSTEP_W + 2 * N);
+  __shared__ float ibuff[BW * (NLDSTEP_H + 2 * N)];
+  __shared__ float fbuff[BW * (NLDSTEP_H + 2 * N)];
+  int tx = threadIdx.x;
+  int ty = threadIdx.y;
+  int x = blockIdx.x * NLDSTEP_W + tx;
+  int y = blockIdx.y * NLDSTEP_H + ty;
+  int xp = (x < N ? 0 : (x > s.width + N - 1 ? s.width - 1 : x - N));
+  int yp = (y < N ? 0 : (y > s.height + N - 1 ? s.height - 1 : y - N));
+  ibuff[ty * BW + tx] = s.imgd[yp * s.pitch + xp];
+  fbuff[ty * BW + tx] = s.flod[yp * s.pitch + xp];
+  __syncthreads();
+
+  int iter = 1;
+  for (int i = N - 1; i >= 0; --i) {
+    float res = 0.0;
+    if (tx < NLDSTEP_W + 2 * i && ty < NLDSTEP_H + 2 * i && x < s.width &&
+        y < s.height) {
+      float *ib = ibuff + (ty + iter) * BW + (tx + iter);
+      float *fb = fbuff + (ty + iter) * BW + (tx + iter);
+      float ib0 = ib[0];
+      float fb0 = fb[0];
+      float xpos = (fb0 + fb[+1]) * (ib[+1] - ib0);
+      float xneg = (fb0 + fb[-1]) * (ib0 - ib[-1]);
+      float ypos = (fb0 + fb[+BW]) * (ib[+BW] - ib0);
+      float yneg = (fb0 + fb[-BW]) * (ib0 - ib[-BW]);
+      res = (s.stepsize[N - 1 - i] * (xpos - xneg + ypos - yneg));
+    }
+    __syncthreads();
+    ibuff[ty * BW + tx] += res;
+    __syncthreads();
+    ++iter;
+  }
+
+  if (tx < NLDSTEP_W && ty < NLDSTEP_H && x < s.width && y < s.height) {
+    s.imgd[y * s.pitch + x] = ibuff[(ty+N) * BW + (tx+N)];
+  }
+}
+
 __global__ void NLDStep(NLDStep_t s) {
 #undef BW
 #define BW (NLDSTEP_W + 2)
@@ -306,7 +406,11 @@ __global__ void NLDStep(NLDStep_t s) {
     float xneg = (fb0 + fb[-1]) * (ib0 - ib[-1]);
     float ypos = (fb0 + fb[+BW]) * (ib[+BW] - ib0);
     float yneg = (fb0 + fb[-BW]) * (ib0 - ib[-BW]);
-    s.temd[y * s.pitch + x] = s.stepsize * (xpos - xneg + ypos - yneg);
+
+    s.imgd[y * s.pitch + x] += (s.stepsize[0] * (xpos - xneg + ypos - yneg));
+
+    /*s.temd[y * s.pitch + x] =
+        (s.stepsize * (xpos - xneg + ypos - yneg));*/
   }
 }
 
@@ -318,54 +422,55 @@ struct NLDUpdate_t {
   int height;
 };
 
-//__global__ void NLDUpdate(float *imgd, float *temd, int width, int pitch, int
-// height)
 __global__ void NLDUpdate(NLDUpdate_t s) {
   int x = blockIdx.x * 32 + threadIdx.x;
   int y = blockIdx.y * 16 + threadIdx.y;
   if (x < s.width && y < s.height) {
     int p = y * s.pitch + x;
-    s.imgd[p] = s.imgd[p] + s.temd[p];
+    s.imgd[p] = s.imgd[p] + (s.temd[p]);
   }
 }
 
+template <int I>
 double NLDStep(CudaImage &img, CudaImage &flow, CudaImage &temp,
-               float stepsize) {
+               float *stepsize) {
   // TimerGPU timer0(0);
   dim3 blocks0(iDivUp(img.width, NLDSTEP_W), iDivUp(img.height, NLDSTEP_H));
-  dim3 threads0(NLDSTEP_W + 2, NLDSTEP_H + 2);
+  dim3 threads0(NLDSTEP_W + I*2, NLDSTEP_H + I*2);
   NLDStep_t s;
   s.imgd = img.d_data;
   s.flod = flow.d_data;
-  s.temd = temp.d_data;
+  s.temd = (float *)temp.d_data;
   s.width = img.width;
   s.pitch = img.pitch;
   s.height = img.height;
-  s.stepsize = 0.5 * stepsize;
-  // NLDStep<<<blocks0, threads0>>>(img.d_data, flow.d_data, temp.d_data,
-  // img.width, img.pitch, img.height, 0.5f*stepsize);
-  NLDStep << <blocks0, threads0>>> (s);
-  // checkMsg("NLDStep() execution failed\n");
-  // safeCall(cudaThreadSynchronize());
+  for (int i = 0; i < I; ++i) {
+    s.stepsize[i] = 0.5 * stepsize[i];
+  }
+  NLDStepMulti<I> << <blocks0, threads0>>> (s);
+
   dim3 blocks1(iDivUp(img.width, 32), iDivUp(img.height, 16));
   dim3 threads1(32, 16);
   NLDUpdate_t su;
   su.imgd = img.d_data;
-  su.temd = temp.d_data;
+  su.temd = (float *)temp.d_data;
   su.width = img.width;
   su.height = img.height;
   su.pitch = img.pitch;
-  // NLDUpdate<<<blocks1, threads1>>>(img.d_data, temp.d_data, img.width,
-  // img.pitch, img.height);
-  NLDUpdate << <blocks1, threads1>>> (su);
-  // checkMsg("NLDUpdate() execution failed\n");
-  // safeCall(cudaThreadSynchronize());
+
+  // NLDUpdate << <blocks1, threads1>>> (su);
+
   double gpuTime = 0;  // = timer0.read();
 #ifdef VERBOSE
   printf("NLDStep time =                %.2f ms\n", gpuTime);
 #endif
   return gpuTime;
 }
+
+template double NLDStep<1>(CudaImage &img, CudaImage &flow, CudaImage &temp,
+                           float* stepsize);
+template double NLDStep<2>(CudaImage &img, CudaImage &flow, CudaImage &temp,
+                           float* stepsize);
 
 __global__ void HalfSample(float *iimd, float *oimd, int iwidth, int iheight,
                            int ipitch, int owidth, int oheight, int opitch) {
@@ -463,9 +568,9 @@ double Copy(CudaImage &inimg, CudaImage &outimg) {
 
 float *AllocBuffers(int width, int height, int num, int omax, int &maxpts,
                     std::vector<CudaImage> &buffers, cv::KeyPoint *&pts,
-                    cv::KeyPoint *&ptsbuffer, short *&ptindices, unsigned char *&desc, float *&descbuffer, CudaImage *&ims) {
-
-  maxpts = 4 * ((maxpts+3)/4);
+                    cv::KeyPoint *&ptsbuffer, short *&ptindices,
+                    unsigned char *&desc, float *&descbuffer, CudaImage *&ims) {
+  maxpts = 4 * ((maxpts + 3) / 4);
 
   buffers.resize(omax * num);
   int w = width;
@@ -490,17 +595,18 @@ float *AllocBuffers(int width, int height, int num, int omax, int &maxpts,
   int ptsbufferstart = size;
   size += sizeof(cv::KeyPoint) * maxpts / sizeof(float);
   int descstart = size;
-  size += sizeof(unsigned char)*maxpts*61/sizeof(float);
+  size += sizeof(unsigned char) * maxpts * 61 / sizeof(float);
   int descbufferstart = size;
-  size += sizeof(float)*3*29*maxpts / sizeof(float);
+  size += sizeof(float) * 3 * 29 * maxpts / sizeof(float);
   int indicesstart = size;
-  size += 21*21*sizeof(short)*maxpts/sizeof(float);
+  size += 21 * 21 * sizeof(short) * maxpts / sizeof(float);
   int imgstart = size;
   size += sizeof(CudaImage) * (num * omax + sizeof(float) - 1) / sizeof(float);
   float *memory = NULL;
   size_t pitch;
 
-  std::cout << "allocating " << size/1024./1024. << " Mbytes of gpu memory\n";
+  std::cout << "allocating " << size / 1024. / 1024.
+            << " Mbytes of gpu memory\n";
 
   safeCall(cudaMallocPitch((void **)&memory, &pitch, (size_t)4096,
                            (size + 4095) / 4096 * sizeof(float)));
@@ -511,8 +617,8 @@ float *AllocBuffers(int width, int height, int num, int omax, int &maxpts,
   pts = (cv::KeyPoint *)(memory + ptsstart);
   ptsbuffer = (cv::KeyPoint *)(memory + ptsbufferstart);
   desc = (unsigned char *)(memory + descstart);
-  descbuffer = (float*)(memory + descbufferstart);
-  ptindices = (short*)(memory + indicesstart);
+  descbuffer = (float *)(memory + descbufferstart);
+  ptindices = (short *)(memory + indicesstart);
   ims = (CudaImage *)(memory + imgstart);
 
   InitCompareIndices();
@@ -521,7 +627,6 @@ float *AllocBuffers(int width, int height, int num, int omax, int &maxpts,
 
   return memory;
 }
-
 
 void FreeBuffers(float *buffers) { safeCall(cudaFree(buffers)); }
 
@@ -753,7 +858,7 @@ __global__ void FindExtrema(float *imd, float *imp, float *imn, int maxx,
       point.pt.y = ratio * (y);
       point.angle = dst1;
     } else {
-        atomicAdd(d_PointCounter,-1);
+      atomicSub(d_PointCounter, 1);
     }
   }
 }
@@ -957,7 +1062,7 @@ __global__ void FindNeighbors(cv::KeyPoint *pts, short *kptindices, int width) {
 // TODO Intermediate storage of memberarray and minneighbor
 #define FilterExtremaThreads 1024
 __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
-                              short *kptindices, int width) {
+                                     short *kptindices, int width) {
   // -1  means not processed
   // -2  means added but replaced
   // >=0 means added
@@ -986,23 +1091,25 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
 
   // Loop until there are no more points to process
   while (true) {
-
-      // Outer loop to handle more than 8*1024 points
-      // Start by restoring memberarray
-      // Make sure to add appropriate offset to indices
-      // for (int offset=0; offset<nump; offset += 8*1024) {
-        // memberarray[i] = storedmemberarray[i+offset];
+    // Outer loop to handle more than 8*1024 points
+    // Start by restoring memberarray
+    // Make sure to add appropriate offset to indices
+    // for (int offset=0; offset<nump; offset += 8*1024) {
+    // memberarray[i] = storedmemberarray[i+offset];
 
     // Mark all points for addition and no minimum neighbor
     for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
-      minneighbor[i] = 8*1024;
+      minneighbor[i] = 8 * 1024;
       shouldAdd[i] = true;
     }
     __syncthreads();
 
-    // Look through all points. If there are points that have not been processed,
-    // disable breaking and check if it has no processed neighbors (add), has all processed
-    // neighbors (compare with neighbors) or has some unprocessed neighbor (wait)
+    // Look through all points. If there are points that have not been
+    // processed,
+    // disable breaking and check if it has no processed neighbors (add), has
+    // all processed
+    // neighbors (compare with neighbors) or has some unprocessed neighbor
+    // (wait)
     for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
       int neighborsSize = kptindices[i * width] - 1;
       short *neighbors = &(kptindices[i * width + 1]);
@@ -1033,7 +1140,8 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
 
         // We should process and potentially replace the neighbor
         if (shouldProcess && !shouldAdd[i]) {
-          // Find the smallest neighbor. Often only one or two, so no ned for fancy algorithm
+          // Find the smallest neighbor. Often only one or two, so no ned for
+          // fancy algorithm
           for (int k = 0; k < neighborsSize; ++k) {
             for (int j = k + 1; j < neighborsSize; ++j) {
               if (memberarray[neighbors[k]] == -2 ||
@@ -1069,7 +1177,7 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
 
     // Look at the neighbors. If the response is higher, replace
     for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
-      if (minneighbor[i] != 8*1024) {
+      if (minneighbor[i] != 8 * 1024) {
         if (memberarray[minneighbor[i]] == -1) {
           if (!shouldAdd[minneighbor[i]]) {
             const cv::KeyPoint &p0 = kpts[minneighbor[i]];
@@ -1097,7 +1205,6 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
       shouldBreak[0] = true;
     }
     __syncthreads();
-
   }
 
   __syncthreads();
@@ -1109,10 +1216,17 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
   int offset = 0;
   for (short i = threadIdx.x; i < upper; i += 2 * FilterExtremaThreads) {
     minneighbor[threadIdx.x] =
-        i >= nump ? 10001 : (memberarray[i] < 0 ? 10001 : (kpts[memberarray[i]].size < 0 ? 10001 : memberarray[i]));
+        i >= nump
+            ? 10001
+            : (memberarray[i] < 0
+                   ? 10001
+                   : (kpts[memberarray[i]].size < 0 ? 10001 : memberarray[i]));
     minneighbor[threadIdx.x + 1024] =
-        i + 1024 >= nump ? 10001
-                         : (memberarray[i + 1024] < 0 ? 10001 : (kpts[memberarray[i+1024]].size < 0 ? 10001 : memberarray[i+1024]));
+        i + 1024 >= nump ? 10001 : (memberarray[i + 1024] < 0
+                                        ? 10001
+                                        : (kpts[memberarray[i + 1024]].size < 0
+                                               ? 10001
+                                               : memberarray[i + 1024]));
 
     __syncthreads();
 
@@ -1132,17 +1246,22 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
 
     for (int k = threadIdx.x; k < 2048; k += 1024) {
       if (minneighbor[k] < 10000) {
-          // Restore subpixel component
-          float octsub = fabs(*(float*)(&kpts[minneighbor[k]].octave));
-          int octave = (int)octsub;
-          float subp = (*(float*)(&kpts[minneighbor[k]].octave) < 0 ? -1 : 1) * (octsub - octave);
-          float ratio = 1 << octave;
-        newkpts[k + curridx[0]].pt.y = ratio * ((int)(0.5f+kpts[minneighbor[k]].pt.y / ratio) + kpts[minneighbor[k]].angle);
-        newkpts[k + curridx[0]].pt.x = ratio * ((int)(0.5f+kpts[minneighbor[k]].pt.x / ratio) + subp);
-        // newkpts[k + curridx[0] + threadIdx.x].angle = 0; // This will be set elsewhere
+        // Restore subpixel component
+        float octsub = fabs(*(float *)(&kpts[minneighbor[k]].octave));
+        int octave = (int)octsub;
+        float subp = (*(float *)(&kpts[minneighbor[k]].octave) < 0 ? -1 : 1) *
+                     (octsub - octave);
+        float ratio = 1 << octave;
+        newkpts[k + curridx[0]].pt.y =
+            ratio * ((int)(0.5f + kpts[minneighbor[k]].pt.y / ratio) +
+                     kpts[minneighbor[k]].angle);
+        newkpts[k + curridx[0]].pt.x =
+            ratio * ((int)(0.5f + kpts[minneighbor[k]].pt.x / ratio) + subp);
+        // newkpts[k + curridx[0] + threadIdx.x].angle = 0; // This will be set
+        // elsewhere
         newkpts[k + curridx[0]].class_id = kpts[minneighbor[k]].class_id;
         newkpts[k + curridx[0]].octave = octave;
-        newkpts[k + curridx[0]].response =  kpts[minneighbor[k]].response;
+        newkpts[k + curridx[0]].response = kpts[minneighbor[k]].response;
         newkpts[k + curridx[0]].size = kpts[minneighbor[k]].size;
       }
     }
@@ -1176,9 +1295,9 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
   }
 }
 
-void FilterExtrema(cv::KeyPoint *pts, cv::KeyPoint *newpts, short* kptindices, int& nump) {
-
-  //int nump;
+void FilterExtrema(cv::KeyPoint *pts, cv::KeyPoint *newpts, short *kptindices,
+                   int &nump) {
+  // int nump;
   cudaMemcpyFromSymbolAsync(&nump, d_PointCounter, sizeof(int));
 
   int width = ceil(21) * ceil(21);
@@ -1203,11 +1322,10 @@ void FilterExtrema(cv::KeyPoint *pts, cv::KeyPoint *newpts, short* kptindices, i
   FilterExtrema_kernel << <blocks, threads>>> (newpts, pts, kptindices, width);
 
   cudaMemcpyFromSymbolAsync(&nump, d_PointCounter, sizeof(int));
-
 }
 
-
-int GetPoints(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts, int numPts) {
+int GetPoints(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts,
+              int numPts) {
   h_pts.resize(numPts);
   safeCall(cudaMemcpyAsync((float *)&h_pts[0], d_pts,
                            sizeof(cv::KeyPoint) * numPts,
@@ -1215,10 +1333,10 @@ int GetPoints(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts, int numPts)
   return numPts;
 }
 
-
 void GetDescriptors(cv::Mat &h_desc, cv::Mat &d_desc, int numPts) {
-    h_desc = cv::Mat(numPts, 61, CV_8U);
-    cudaMemcpyAsync(h_desc.data, d_desc.data, numPts*61, cudaMemcpyDeviceToHost, copyStream);
+  h_desc = cv::Mat(numPts, 61, CV_8U);
+  cudaMemcpyAsync(h_desc.data, d_desc.data, numPts * 61, cudaMemcpyDeviceToHost,
+                  copyStream);
 }
 
 
@@ -1302,8 +1420,7 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
 
   __syncthreads();
 
-
-// Reduce stuff
+  // Reduce stuff
   float acc_reg;
 #pragma unroll
   for (int i = 0; i < 15; ++i) {
@@ -1337,25 +1454,23 @@ __global__ void ExtractDescriptors(cv::KeyPoint *d_pts, CudaImage *d_imgs,
   }
 }
 
+
 __global__ void ExtractDescriptors_serial(cv::KeyPoint *d_pts,
                                           CudaImage *d_imgs, float *_vals,
                                           int size2, int size3, int size4) {
-  __shared__ float acc_vals[30 * EXTRACT_S];
-  __shared__ float final_vals[3 * 30];
+  __shared__ __half acc_vals[30 * EXTRACT_S];
+  __shared__ float _final_vals[3 * 30/2];
+  __half* final_vals = (__half*)_final_vals;
 
-  int p = blockIdx.x;
-
-  float *vals = &_vals[p * 3 * 29];
-
-  float iratio = 1.0f / (1 << d_pts[p].octave);
-  int scale = (int)(0.5f * d_pts[p].size * iratio + 0.5f);
-  float xf = d_pts[p].pt.x * iratio;
-  float yf = d_pts[p].pt.y * iratio;
-  float ang = d_pts[p].angle;
-  float co = cos(ang);
-  float si = sin(ang);
+  float iratio = 1.0f / (1 << d_pts[blockIdx.x].octave);
+  int scale = (int)(0.5f * d_pts[blockIdx.x].size * iratio + 0.5f);
+  float xf = d_pts[blockIdx.x].pt.x * iratio;
+  float yf = d_pts[blockIdx.x].pt.y * iratio;
+  float ang = d_pts[blockIdx.x].angle;
+  float co = cosf(ang);
+  float si = sinf(ang);
   int tx = threadIdx.x;
-  int lev = d_pts[p].class_id;
+  int lev = d_pts[blockIdx.x].class_id;
   float *imd = d_imgs[4 * lev + 0].d_data;
   float *dxd = d_imgs[4 * lev + 2].d_data;
   float *dyd = d_imgs[4 * lev + 3].d_data;
@@ -1363,8 +1478,8 @@ __global__ void ExtractDescriptors_serial(cv::KeyPoint *d_pts,
   int winsize = max(3 * size3, 4 * size4);
 
   // IM
-  for (int i = 0; i < 30; ++i) {
-    acc_vals[i * EXTRACT_S + tx] = 0.f;
+  for (int i = 0; i < 15; ++i) {
+    ((float*)acc_vals)[i * EXTRACT_S + tx] = 0.f;
   }
 
   __syncthreads();
@@ -1378,34 +1493,32 @@ __global__ void ExtractDescriptors_serial(cv::KeyPoint *d_pts,
     int k = y - size2;
     int xp = (int)(xf + scale * (k * co - l * si) + 0.5f);
     int yp = (int)(yf + scale * (k * si + l * co) + 0.5f);
-    int pos = yp * pitch + xp;
-    float im = imd[pos];
+    //int pos = yp * pitch + xp;
+    float im = imd[yp * pitch + xp];
     if (m < 2 * size2) {
       int x2 = (x < size2 ? 0 : 1);
       int y2 = (y < size2 ? 0 : 1);
-      // atomicAdd(norm2, (x < size2 && y < size2 ? 1 : 0));
       // Add 2x2
-      acc_vals[(y2 * 2 + x2) + 30 * tx] += im;
+      acc_vals[(y2 * 2 + x2) + 30 * tx] = __float2half(__half2float(acc_vals[(y2 * 2 + x2) + 30 * tx]) + im);
     }
     if (m < 3 * size3) {
       int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
       int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
-      // atomicAdd(norm3, (x < size3 && y < size3 ? 1 : 0));
       // Add 3x3
-      acc_vals[(4 + y3 * 3 + x3) + 30 * tx] += im;
+      acc_vals[(4 + y3 * 3 + x3) + 30 * tx] = __float2half(__half2float(acc_vals[(4 + y3 * 3 + x3) + 30 * tx]) + im);
     }
     if (m < 4 * size4) {
       int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
       int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
-      // atomicAdd(norm4, (x < size4 && y < size4 ? 1 : 0));
       // Add 4x4
-      acc_vals[(4 + 9 + y4 * 4 + x4) + 30 * tx] += im;
+      acc_vals[(4 + 9 + y4 * 4 + x4) + 30 * tx] = __float2half(__half2float(acc_vals[(4 + 9 + y4 * 4 + x4) + 30 * tx]) + im);
     }
   }
 
   __syncthreads();
 
 // Reduce stuff
+  // TODO move to shuffle instructions
 #pragma unroll
   for (int i = 0; i < 15; ++i) {
     // 0..31 takes care of even accs, 32..63 takes care of odd accs
@@ -1413,28 +1526,28 @@ __global__ void ExtractDescriptors_serial(cv::KeyPoint *d_pts,
     int tx_d = tx < 32 ? tx : tx - 32;
     int acc_idx = 30 * tx_d + offset;
     if (tx_d < 32) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 32];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 32]));
     }
     if (tx_d < 16) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 16];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 16]));
     }
     if (tx_d < 8) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 8];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 8]));
     }
     if (tx_d < 4) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 4];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 4]));
     }
     if (tx_d < 2) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 2];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 2]));
     }
     if (tx_d < 1) {
-      final_vals[3 * offset] = acc_vals[acc_idx] + acc_vals[offset + 30];
+      final_vals[3 * offset] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30]));
     }
   }
 
   // DX
-  for (int i = 0; i < 30; ++i) {
-    acc_vals[i * EXTRACT_S + tx] = 0.f;
+  for (int i = 0; i < 15; ++i) {
+    ((float*)acc_vals)[i * EXTRACT_S + tx] = 0.f;
   }
 
   __syncthreads();
@@ -1448,36 +1561,37 @@ __global__ void ExtractDescriptors_serial(cv::KeyPoint *d_pts,
     int k = y - size2;
     int xp = (int)(xf + scale * (k * co - l * si) + 0.5f);
     int yp = (int)(yf + scale * (k * si + l * co) + 0.5f);
-    int pos = yp * pitch + xp;
-    float dx = dxd[pos];
-    float dy = dyd[pos];
+    //int pos = yp * pitch + xp;
+    float dx = dxd[yp * pitch + xp];
+    float dy = dyd[yp * pitch + xp];
     float rx = -dx * si + dy * co;
     if (m < 2 * size2) {
       int x2 = (x < size2 ? 0 : 1);
       int y2 = (y < size2 ? 0 : 1);
       // atomicAdd(norm2, (x < size2 && y < size2 ? 1 : 0));
       // Add 2x2
-      acc_vals[(y2 * 2 + x2) + 30 * tx] += rx;
+      acc_vals[(y2 * 2 + x2) + 30 * tx] = __float2half(__half2float(acc_vals[(y2 * 2 + x2) + 30 * tx]) + rx);
     }
     if (m < 3 * size3) {
       int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
       int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
       // atomicAdd(norm3, (x < size3 && y < size3 ? 1 : 0));
       // Add 3x3
-      acc_vals[(4 + y3 * 3 + x3) + 30 * tx] += rx;
+      acc_vals[(4 + y3 * 3 + x3) + 30 * tx] = __float2half(__half2float(acc_vals[(4 + y3 * 3 + x3) + 30 * tx]) + rx);
     }
     if (m < 4 * size4) {
       int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
       int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
       // atomicAdd(norm4, (x < size4 && y < size4 ? 1 : 0));
       // Add 4x4
-      acc_vals[(4 + 9 + y4 * 4 + x4) + 30 * tx] += rx;
+      acc_vals[(4 + 9 + y4 * 4 + x4) + 30 * tx] = __float2half(__half2float(acc_vals[(4 + 9 + y4 * 4 + x4) + 30 * tx]) + rx);
     }
   }
 
   __syncthreads();
 
 // Reduce stuff
+  // TODO move to shuffle instructions
 #pragma unroll
   for (int i = 0; i < 15; ++i) {
     // 0..31 takes care of even accs, 32..63 takes care of odd accs
@@ -1485,28 +1599,28 @@ __global__ void ExtractDescriptors_serial(cv::KeyPoint *d_pts,
     int tx_d = tx < 32 ? tx : tx - 32;
     int acc_idx = 30 * tx_d + offset;
     if (tx_d < 32) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 32];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 32]));
     }
     if (tx_d < 16) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 16];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 16]));
     }
     if (tx_d < 8) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 8];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 8]));
     }
     if (tx_d < 4) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 4];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 4]));
     }
     if (tx_d < 2) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 2];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 2]));
     }
     if (tx_d < 1) {
-      final_vals[3 * offset] = acc_vals[acc_idx] + acc_vals[offset + 30];
+      final_vals[3 * offset] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30]));
     }
   }
 
   // DY
-  for (int i = 0; i < 30; ++i) {
-    acc_vals[i * EXTRACT_S + tx] = 0.f;
+  for (int i = 0; i < 15; ++i) {
+    ((float*)acc_vals)[i * EXTRACT_S + tx] = 0.f;
   }
 
   __syncthreads();
@@ -1520,36 +1634,37 @@ __global__ void ExtractDescriptors_serial(cv::KeyPoint *d_pts,
     int k = y - size2;
     int xp = (int)(xf + scale * (k * co - l * si) + 0.5f);
     int yp = (int)(yf + scale * (k * si + l * co) + 0.5f);
-    int pos = yp * pitch + xp;
-    float dx = dxd[pos];
-    float dy = dyd[pos];
+    //int pos = yp * pitch + xp;
+    float dx = dxd[yp * pitch + xp];
+    float dy = dyd[yp * pitch + xp];
     float ry = dx * co + dy * si;
     if (m < 2 * size2) {
       int x2 = (x < size2 ? 0 : 1);
       int y2 = (y < size2 ? 0 : 1);
       // atomicAdd(norm2, (x < size2 && y < size2 ? 1 : 0));
       // Add 2x2
-      acc_vals[(y2 * 2 + x2) + 30 * tx] += ry;
+      acc_vals[(y2 * 2 + x2) + 30 * tx] = __float2half(__half2float(acc_vals[(y2 * 2 + x2) + 30 * tx]) + ry);
     }
     if (m < 3 * size3) {
       int x3 = (x < size3 ? 0 : (x < 2 * size3 ? 1 : 2));
       int y3 = (y < size3 ? 0 : (y < 2 * size3 ? 1 : 2));
       // atomicAdd(norm3, (x < size3 && y < size3 ? 1 : 0));
       // Add 3x3
-      acc_vals[(4 + y3 * 3 + x3) + 30 * tx] += ry;
+      acc_vals[(4 + y3 * 3 + x3) + 30 * tx] = __float2half(__half2float(acc_vals[(4 + y3 * 3 + x3) + 30 * tx]) + ry);
     }
     if (m < 4 * size4) {
       int x4 = (x < 2 * size4 ? (x < size4 ? 0 : 1) : (x < 3 * size4 ? 2 : 3));
       int y4 = (y < 2 * size4 ? (y < size4 ? 0 : 1) : (y < 3 * size4 ? 2 : 3));
       // atomicAdd(norm4, (x < size4 && y < size4 ? 1 : 0));
       // Add 4x4
-      acc_vals[(4 + 9 + y4 * 4 + x4) + 30 * tx] += ry;
+      acc_vals[(4 + 9 + y4 * 4 + x4) + 30 * tx] = __float2half(__half2float(acc_vals[(4 + 9 + y4 * 4 + x4) + 30 * tx]) + ry);
     }
   }
 
   __syncthreads();
 
 // Reduce stuff
+  // TODO move to shuffle instructions
 #pragma unroll
   for (int i = 0; i < 15; ++i) {
     // 0..31 takes care of even accs, 32..63 takes care of odd accs
@@ -1557,22 +1672,22 @@ __global__ void ExtractDescriptors_serial(cv::KeyPoint *d_pts,
     int tx_d = tx < 32 ? tx : tx - 32;
     int acc_idx = 30 * tx_d + offset;
     if (tx_d < 32) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 32];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 32]));
     }
     if (tx_d < 16) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 16];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 16]));
     }
     if (tx_d < 8) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 8];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 8]));
     }
     if (tx_d < 4) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 4];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 4]));
     }
     if (tx_d < 2) {
-      acc_vals[acc_idx] += acc_vals[acc_idx + 30 * 2];
+      acc_vals[acc_idx] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30 * 2]));
     }
     if (tx_d < 1) {
-      final_vals[3 * offset] = acc_vals[acc_idx] + acc_vals[offset + 30];
+      final_vals[3 * offset] = __float2half(__half2float(acc_vals[acc_idx]) + __half2float(acc_vals[acc_idx + 30]));
     }
   }
 
@@ -1580,13 +1695,14 @@ __global__ void ExtractDescriptors_serial(cv::KeyPoint *d_pts,
 
   // Have 29*3 values to store
   // They are in acc_vals[0..28,64*30..64*30+28,64*60..64*60+28]
+  float *vals = &_vals[blockIdx.x * 3 * 29];
+
   if (tx < 29) {
-    vals[tx] = final_vals[tx];
-    vals[29 + tx] = final_vals[29 + tx];
-    vals[2 * 29 + tx] = final_vals[2 * 29 + tx];
+    vals[tx] = __half2float(final_vals[tx]);
+    vals[29 + tx] = __half2float(final_vals[29 + tx]);
+    vals[2 * 29 + tx] = __half2float(final_vals[2 * 29 + tx]);
   }
 }
-
 
 __global__ void BuildDescriptor(float *_valsim, unsigned char *_desc) {
   int p = blockIdx.x;
@@ -1609,6 +1725,37 @@ __global__ void BuildDescriptor(float *_valsim, unsigned char *_desc) {
 
     desc[idx] = desc_r;
   }
+}
+
+double ExtractDescriptors(cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs,
+                          CudaImage *d_imgs, unsigned char *desc_d,
+                          float *vals_d, int patsize, int numPts) {
+  int size2 = patsize;
+  int size3 = ceil(2.0f * patsize / 3.0f);
+  int size4 = ceil(0.5f * patsize);
+  // int numPts;
+  // cudaMemcpyFromSymbol(&numPts, d_PointCounter, sizeof(int));
+
+  std::cout << "building descripor for " << numPts << " points\n";
+
+  // TimerGPU timer0(0);
+  dim3 blocks(numPts);
+  dim3 threads(EXTRACT_S);
+
+  ExtractDescriptors_serial << <blocks, threads>>>
+      (d_pts, d_imgs, vals_d, size2, size3, size4);
+
+  cudaMemsetAsync(desc_d, 0, numPts * 61);
+  BuildDescriptor << <blocks, 64>>> (vals_d, desc_d);
+
+  ////checkMsg("ExtractDescriptors() execution failed\n");
+  // safeCall(cudaThreadSynchronize());
+  double gpuTime = 0;  // timer0.read();
+#ifdef VERBOSE
+  printf("ExtractDescriptors time =     %.2f ms\n", gpuTime);
+#endif
+
+  return gpuTime;
 }
 
 #define NTHREADS_MATCH 32
@@ -1785,7 +1932,6 @@ __global__ void MatchDescriptors(unsigned char *d1, unsigned char *d2,
   }
 }
 
-
 void MatchDescriptors(cv::Mat &desc_query, cv::Mat &desc_train,
                       std::vector<std::vector<cv::DMatch> > &dmatches) {
   size_t pitch1, pitch2;
@@ -1826,116 +1972,81 @@ void MatchDescriptors(cv::Mat &desc_query, cv::Mat &desc_train,
   delete[] dmatches_h;
 }
 
-
 void InitCompareIndices() {
+  int comp_idx_1_h[61 * 8];
+  int comp_idx_2_h[61 * 8];
 
-    int comp_idx_1_h[61 * 8];
-    int comp_idx_2_h[61 * 8];
-
-    int cntr = 0;
-    for (int j = 0; j < 4; ++j) {
-      for (int i = j + 1; i < 4; ++i) {
-        comp_idx_1_h[cntr] = 3 * j;
-        comp_idx_2_h[cntr] = 3 * i;
-        cntr++;
-      }
+  int cntr = 0;
+  for (int j = 0; j < 4; ++j) {
+    for (int i = j + 1; i < 4; ++i) {
+      comp_idx_1_h[cntr] = 3 * j;
+      comp_idx_2_h[cntr] = 3 * i;
+      cntr++;
     }
-    for (int j = 0; j < 3; ++j) {
-      for (int i = j + 1; i < 4; ++i) {
-        comp_idx_1_h[cntr] = 3 * j + 1;
-        comp_idx_2_h[cntr] = 3 * i + 1;
-        cntr++;
-      }
+  }
+  for (int j = 0; j < 3; ++j) {
+    for (int i = j + 1; i < 4; ++i) {
+      comp_idx_1_h[cntr] = 3 * j + 1;
+      comp_idx_2_h[cntr] = 3 * i + 1;
+      cntr++;
     }
-    for (int j = 0; j < 3; ++j) {
-      for (int i = j + 1; i < 4; ++i) {
-        comp_idx_1_h[cntr] = 3 * j + 2;
-        comp_idx_2_h[cntr] = 3 * i + 2;
-        cntr++;
-      }
+  }
+  for (int j = 0; j < 3; ++j) {
+    for (int i = j + 1; i < 4; ++i) {
+      comp_idx_1_h[cntr] = 3 * j + 2;
+      comp_idx_2_h[cntr] = 3 * i + 2;
+      cntr++;
     }
+  }
 
-    // 3x3
-    for (int j = 4; j < 12; ++j) {
-      for (int i = j + 1; i < 13; ++i) {
-        comp_idx_1_h[cntr] = 3 * j;
-        comp_idx_2_h[cntr] = 3 * i;
-        cntr++;
-      }
+  // 3x3
+  for (int j = 4; j < 12; ++j) {
+    for (int i = j + 1; i < 13; ++i) {
+      comp_idx_1_h[cntr] = 3 * j;
+      comp_idx_2_h[cntr] = 3 * i;
+      cntr++;
     }
-    for (int j = 4; j < 12; ++j) {
-      for (int i = j + 1; i < 13; ++i) {
-        comp_idx_1_h[cntr] = 3 * j + 1;
-        comp_idx_2_h[cntr] = 3 * i + 1;
-        cntr++;
-      }
+  }
+  for (int j = 4; j < 12; ++j) {
+    for (int i = j + 1; i < 13; ++i) {
+      comp_idx_1_h[cntr] = 3 * j + 1;
+      comp_idx_2_h[cntr] = 3 * i + 1;
+      cntr++;
     }
-    for (int j = 4; j < 12; ++j) {
-      for (int i = j + 1; i < 13; ++i) {
-        comp_idx_1_h[cntr] = 3 * j + 2;
-        comp_idx_2_h[cntr] = 3 * i + 2;
-        cntr++;
-      }
+  }
+  for (int j = 4; j < 12; ++j) {
+    for (int i = j + 1; i < 13; ++i) {
+      comp_idx_1_h[cntr] = 3 * j + 2;
+      comp_idx_2_h[cntr] = 3 * i + 2;
+      cntr++;
     }
+  }
 
-    // 4x4
-    for (int j = 13; j < 28; ++j) {
-      for (int i = j + 1; i < 29; ++i) {
-        comp_idx_1_h[cntr] = 3 * j;
-        comp_idx_2_h[cntr] = 3 * i;
-        cntr++;
-      }
+  // 4x4
+  for (int j = 13; j < 28; ++j) {
+    for (int i = j + 1; i < 29; ++i) {
+      comp_idx_1_h[cntr] = 3 * j;
+      comp_idx_2_h[cntr] = 3 * i;
+      cntr++;
     }
-    for (int j = 13; j < 28; ++j) {
-      for (int i = j + 1; i < 29; ++i) {
-        comp_idx_1_h[cntr] = 3 * j + 1;
-        comp_idx_2_h[cntr] = 3 * i + 1;
-        cntr++;
-      }
+  }
+  for (int j = 13; j < 28; ++j) {
+    for (int i = j + 1; i < 29; ++i) {
+      comp_idx_1_h[cntr] = 3 * j + 1;
+      comp_idx_2_h[cntr] = 3 * i + 1;
+      cntr++;
     }
-    for (int j = 13; j < 28; ++j) {
-      for (int i = j + 1; i < 29; ++i) {
-        comp_idx_1_h[cntr] = 3 * j + 2;
-        comp_idx_2_h[cntr] = 3 * i + 2;
-        cntr++;
-      }
+  }
+  for (int j = 13; j < 28; ++j) {
+    for (int i = j + 1; i < 29; ++i) {
+      comp_idx_1_h[cntr] = 3 * j + 2;
+      comp_idx_2_h[cntr] = 3 * i + 2;
+      cntr++;
     }
+  }
 
-    cudaMemcpyToSymbol(comp_idx_1, comp_idx_1_h, 8 * 61 * sizeof(int));
-    cudaMemcpyToSymbol(comp_idx_2, comp_idx_2_h, 8 * 61 * sizeof(int));
-
-}
-
-
-double ExtractDescriptors(cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, CudaImage *d_imgs,
-                          unsigned char *desc_d, float* vals_d, int patsize, int numPts) {
-  int size2 = patsize;
-  int size3 = ceil(2.0f * patsize / 3.0f);
-  int size4 = ceil(0.5f * patsize);
-  //int numPts;
-  //cudaMemcpyFromSymbol(&numPts, d_PointCounter, sizeof(int));
-
-  std::cout << "building descripor for " << numPts << " points\n";
-
-  // TimerGPU timer0(0);
-  dim3 blocks(numPts);
-  dim3 threads(EXTRACT_S);
-
-  ExtractDescriptors << <blocks, threads>>>(d_pts, d_imgs, vals_d, size2, size3, size4);
-
-
-  cudaMemsetAsync(desc_d, 0, numPts * 61);
-  BuildDescriptor << <blocks, 64>>> (vals_d, desc_d);
-
-
-  ////checkMsg("ExtractDescriptors() execution failed\n");
-  // safeCall(cudaThreadSynchronize());
-  double gpuTime = 0;  // timer0.read();
-#ifdef VERBOSE
-  printf("ExtractDescriptors time =     %.2f ms\n", gpuTime);
-#endif
-
-  return gpuTime;
+  cudaMemcpyToSymbol(comp_idx_1, comp_idx_1_h, 8 * 61 * sizeof(int));
+  cudaMemcpyToSymbol(comp_idx_2, comp_idx_2_h, 8 * 61 * sizeof(int));
 }
 
 __global__ void FindOrientation(cv::KeyPoint *d_pts, CudaImage *d_imgs) {
@@ -1993,9 +2104,9 @@ __global__ void FindOrientation(cv::KeyPoint *d_pts, CudaImage *d_imgs) {
   }
 }
 
-double FindOrientation(cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, CudaImage *d_imgs, int numPts) {
-
-    std::cout << "numpts: " << numPts << std::endl;
+double FindOrientation(cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs,
+                       CudaImage *d_imgs, int numPts) {
+  std::cout << "numpts: " << numPts << std::endl;
 
   safeCall(cudaMemcpyAsync(d_imgs, (float *)&h_imgs[0],
                            sizeof(CudaImage) * h_imgs.size(),
