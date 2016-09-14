@@ -2,7 +2,7 @@
 #include "cudaImage.h"
 
 float *AllocBuffers(int width, int height, int num, int omax, int &maxpts, std::vector<CudaImage> &buffers, cv::KeyPoint *&pts,
-                    cv::KeyPoint *&ptsbuffer, short *&ptindices, unsigned char *&desc, float *&descbuffer, CudaImage *&ims);
+                    cv::KeyPoint *&ptsbuffer, short *&ptindices, unsigned char *&desc, float *&descbuffer, CudaImage *&ims, size_t&);
 void InitCompareIndices();
 void FreeBuffers(float *buffers);
 double LowPass(CudaImage &inimg, CudaImage &outimg, CudaImage &temp, double var, int kernsize);
@@ -21,4 +21,6 @@ void WaitCuda();
 void GetDescriptors(cv::Mat &h_desc, cv::Mat &d_desc, int numPts);
 double FindOrientation(cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, CudaImage *d_imgs, int numPts);
 double ExtractDescriptors(cv::KeyPoint *d_pts, std::vector<CudaImage> &cuda_buffers, CudaImage *cuda_images, unsigned char* desc_h, float *vals_d, int patsize, int numPts);
-void MatchDescriptors(cv::Mat& desc_query, cv::Mat& desc_train, std::vector<std::vector<cv::DMatch> >& dmatches);
+
+void MatchGPUDescriptors(cv::Mat &desc_query, cv::Mat &desc_train, int nump, std::vector<std::vector<cv::DMatch> > &dmatches);
+void MatchDescriptors(cv::Mat& desc_query, cv::Mat& desc_train, int nump, std::vector<std::vector<cv::DMatch> >& dmatches);

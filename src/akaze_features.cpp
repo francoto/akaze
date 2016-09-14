@@ -95,7 +95,7 @@ int main(int argc, char* argv[]) {
   t2 = cv::getTickCount();
   tdesc = 1000.0 * (t2 - t1) / cv::getTickFrequency();
 
-  for (int i=0; i<kpts.size(); ++i) {
+  for (unsigned int i=0; i<kpts.size(); ++i) {
       cv::KeyPoint &pt = kpts[i];
       if (pt.size < 0)
           std::cout << pt.pt.y << " " << pt.pt.x << std::endl;
@@ -104,7 +104,7 @@ int main(int argc, char* argv[]) {
   cudaProfilerStop();
 
   std::vector<std::vector<cv::DMatch> > dmatches;
-  MatchDescriptors(desc, desc, dmatches);
+  MatchDescriptors(desc, desc, kpts.size(), dmatches);
 
   // opencv bruteforce macher
   std::vector<std::vector<cv::DMatch> > cv_matches;

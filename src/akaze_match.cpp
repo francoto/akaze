@@ -118,20 +118,25 @@ int main(int argc, char *argv[]) {
   evolution2.Feature_Detection(kpts2);
   evolution2.Compute_Descriptors(kpts2, desc2);
 
+  evolution2.Init_Model(desc1);
+  evolution2.Match_Current(dmatches);
+
+  //MatchDescriptors(desc1,desc2,kpts1.size(),dmatches);
+  
   t2 = cv::getTickCount();
   takaze = 1000.0*(t2-t1)/cv::getTickFrequency();
 
-  // Matching Descriptors!!
+  // Matching descriptors!!
   vector<cv::Point2f> matches, inliers;
   cv::Ptr<cv::DescriptorMatcher> matcher_l2 = cv::DescriptorMatcher::create("BruteForce");
   cv::Ptr<cv::DescriptorMatcher> matcher_l1 = cv::DescriptorMatcher::create("BruteForce-Hamming");
 
   t1 = cv::getTickCount();
 
-  if (options.descriptor < MLDB_UPRIGHT)
-    matcher_l2->knnMatch(desc1, desc2, dmatches, 2);
-  else
-    matcher_l1->knnMatch(desc1, desc2, dmatches, 2);
+//  if (options.descriptor < MLDB_UPRIGHT)
+//    matcher_l2->knnMatch(desc1, desc2, dmatches, 2);
+//  else
+//    matcher_l1->knnMatch(desc1, desc2, dmatches, 2);
 
   t2 = cv::getTickCount();
   tmatch = 1000.0*(t2 - t1)/ cv::getTickFrequency();

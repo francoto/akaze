@@ -52,6 +52,13 @@ namespace libAKAZECU {
     short* cuda_ptindices;
     CudaImage *cuda_images;
     std::vector<CudaImage> cuda_buffers;
+
+      std::vector<cv::KeyPoint> model_keypoints;
+      cv::Mat cuda_model_buffer;
+      cv::DMatch* matches_buffer;
+      size_t cuda_model_buffer_pitch;
+
+      
     int nump;
 
   public:
@@ -105,6 +112,14 @@ namespace libAKAZECU {
     AKAZETiming Get_Computation_Times() const {
       return timing_;
     }
+
+      void Init_Model(const cv::Mat& _descriptors);
+      void Free_Model();
+
+      // Matches the model with the current descriptors
+      void Match_Current(std::vector<std::vector<cv::DMatch> > &_matches);
+
+      
   };
 
   /* ************************************************************************* */

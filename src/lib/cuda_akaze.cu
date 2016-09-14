@@ -463,7 +463,7 @@ double Copy(CudaImage &inimg, CudaImage &outimg) {
 
 float *AllocBuffers(int width, int height, int num, int omax, int &maxpts,
                     std::vector<CudaImage> &buffers, cv::KeyPoint *&pts,
-                    cv::KeyPoint *&ptsbuffer, short *&ptindices, unsigned char *&desc, float *&descbuffer, CudaImage *&ims) {
+                    cv::KeyPoint *&ptsbuffer, short *&ptindices, unsigned char *&desc, float *&descbuffer, CudaImage *&ims, size_t& descb_p) {
 
   maxpts = 4 * ((maxpts+3)/4);
 
@@ -490,8 +490,8 @@ float *AllocBuffers(int width, int height, int num, int omax, int &maxpts,
   int ptsbufferstart = size;
   size += sizeof(cv::KeyPoint) * maxpts / sizeof(float);
   int descstart = size;
-  size += sizeof(unsigned char)*maxpts*61/sizeof(float);
-  int descbufferstart = size;
+  //size += sizeof(unsigned char)*maxpts*64/sizeof(float);
+  //int descbufferstart = size;
   size += sizeof(float)*3*29*maxpts / sizeof(float);
   int indicesstart = size;
   size += 21*21*sizeof(short)*maxpts/sizeof(float);
@@ -511,10 +511,13 @@ float *AllocBuffers(int width, int height, int num, int omax, int &maxpts,
   pts = (cv::KeyPoint *)(memory + ptsstart);
   ptsbuffer = (cv::KeyPoint *)(memory + ptsbufferstart);
   desc = (unsigned char *)(memory + descstart);
-  descbuffer = (float*)(memory + descbufferstart);
+  //descbuffer = (float*)(memory + descbufferstart);
   ptindices = (short*)(memory + indicesstart);
   ims = (CudaImage *)(memory + imgstart);
 
+  cudaMallocPitch(&descbuffer,&descb_p,64,maxpts);
+  cudaMemset2D(descbuffer, descb_p, 0, 64, maxpts);
+  
   InitCompareIndices();
 
   cudaStreamCreate(&copyStream);
@@ -1218,7 +1221,8 @@ int GetPoints(std::vector<cv::KeyPoint> &h_pts, cv::KeyPoint *d_pts, int numPts)
 
 void GetDescriptors(cv::Mat &h_desc, cv::Mat &d_desc, int numPts) {
     h_desc = cv::Mat(numPts, 61, CV_8U);
-    cudaMemcpyAsync(h_desc.data, d_desc.data, numPts*61, cudaMemcpyDeviceToHost, copyStream);
+    //cudaMemcpyAsync(h_desc.data, d_desc.data, numPts*61, cudaMemcpyDeviceToHost, copyStream);
+    cudaMemcpy2DAsync(h_desc.data, 61, d_desc.data, 512, 61, numPts, cudaMemcpyDeviceToHost, copyStream);
 }
 
 
@@ -1596,7 +1600,7 @@ __global__ void BuildDescriptor(float *_valsim, unsigned char *_desc) {
   if (idx < 61) {
     float *valsim = &_valsim[3 * 29 * p];
 
-    unsigned char *desc = &_desc[61 * p];
+    unsigned char *desc = &_desc[512 * p];
 
     unsigned char desc_r = 0;
 
@@ -1785,15 +1789,40 @@ __global__ void MatchDescriptors(unsigned char *d1, unsigned char *d2,
   }
 }
 
+void MatchGPUDescriptors(cv::Mat &desc_query, cv::Mat &desc_train, int nump,
+			 std::vector<std::vector<cv::DMatch> > &dmatches) {
 
-void MatchDescriptors(cv::Mat &desc_query, cv::Mat &desc_train,
+  dim3 block(desc_query.rows);
+
+  cv::DMatch *dmatches_d;
+  cudaMalloc(&dmatches_d, desc_query.rows * 2 * sizeof(cv::DMatch));
+
+  MatchDescriptors << <block, NTHREADS_MATCH>>>
+      (desc_query.data, desc_train.data, desc_query.cols, desc_train.rows, dmatches_d);
+
+  cv::DMatch *dmatches_h = new cv::DMatch[2 * desc_query.rows];
+  cudaMemcpy(dmatches_h, dmatches_d, desc_query.rows * 2 * sizeof(cv::DMatch),
+             cudaMemcpyDeviceToHost);
+
+  for (int i = 0; i < desc_query.rows; ++i) {
+    std::vector<cv::DMatch> tdmatch;
+    tdmatch.push_back(dmatches_h[2 * i]);
+    tdmatch.push_back(dmatches_h[2 * i + 1]);
+    dmatches.push_back(tdmatch);
+  }
+
+  cudaFree(dmatches_d);
+  delete[] dmatches_h;
+}
+
+void MatchDescriptors(cv::Mat &desc_query, cv::Mat &desc_train, int nump,
                       std::vector<std::vector<cv::DMatch> > &dmatches) {
   size_t pitch1, pitch2;
   unsigned char *descq_d;
   cudaMallocPitch(&descq_d, &pitch1, 64, desc_query.rows);
   cudaMemset2D(descq_d, pitch1, 0, 64, desc_query.rows);
   cudaMemcpy2D(descq_d, pitch1, desc_query.data, desc_query.cols,
-               desc_query.cols, desc_query.rows, cudaMemcpyHostToDevice);
+  desc_query.cols, desc_query.rows, cudaMemcpyHostToDevice);
   unsigned char *desct_d;
   cudaMallocPitch(&desct_d, &pitch2, 64, desc_train.rows);
   cudaMemset2D(desct_d, pitch2, 0, 64, desc_train.rows);
@@ -1924,7 +1953,7 @@ double ExtractDescriptors(cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, C
   ExtractDescriptors << <blocks, threads>>>(d_pts, d_imgs, vals_d, size2, size3, size4);
 
 
-  cudaMemsetAsync(desc_d, 0, numPts * 61);
+  cudaMemset2DAsync(desc_d, 512, 0, 61, numPts);
   BuildDescriptor << <blocks, 64>>> (vals_d, desc_d);
 
 

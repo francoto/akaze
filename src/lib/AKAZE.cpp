@@ -24,6 +24,8 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <cstdio>  //%%%%
 
+#include <cuda_runtime.h>
+
 using namespace std;
 using namespace libAKAZECU;
 
@@ -104,11 +106,13 @@ void AKAZE::Allocate_Memory_Evolution() {
   // Allocate memory for CUDA buffers
   options_.ncudaimages = 4 * options_.nsublevels;
   unsigned char* _cuda_desc;
+  size_t p;
   cuda_memory = AllocBuffers(
       evolution_[0].Lt.cols, evolution_[0].Lt.rows, options_.ncudaimages,
       options_.omax, options_.maxkeypoints, cuda_buffers, cuda_bufferpoints,
-      cuda_points, cuda_ptindices, _cuda_desc, cuda_descbuffer, cuda_images);
-  cuda_desc = cv::Mat(options_.maxkeypoints, 61, CV_8U, _cuda_desc);
+      cuda_points, cuda_ptindices, _cuda_desc, cuda_descbuffer, cuda_images,p);
+  cuda_desc = cv::Mat(options_.maxkeypoints, p, CV_8U, _cuda_desc);
+  std::cout << "alloc cuda desc: " << p << std::endl;
 
 }
 
@@ -331,6 +335,39 @@ void AKAZE::Save_Detector_Responses() {
     }
   }
 }
+
+void AKAZE::Init_Model(const cv::Mat& _descriptors) {
+
+    unsigned char* buffer_d = NULL;
+    size_t p;
+    cudaMallocPitch((void**)&buffer_d, &p, 64, _descriptors.rows);
+    std::cout << "initing model: " << p << std::endl;
+    cudaMemset2D(buffer_d, p, 0, p, _descriptors.rows);
+    
+    cuda_model_buffer = cv::Mat(_descriptors.rows,p,CV_8U,buffer_d);
+    
+    // Copy mat to cuda buffer
+    cudaMemcpy2D(cuda_model_buffer.data, p, _descriptors.data, _descriptors.cols, _descriptors.cols, _descriptors.rows, cudaMemcpyHostToDevice);
+
+}
+
+
+void AKAZE::Free_Model() {
+    cudaFree(cuda_model_buffer.data);
+    cuda_model_buffer = cv::Mat();
+}
+
+
+void AKAZE::Match_Current(std::vector<std::vector<cv::DMatch> > &_matches) {
+
+    if (matches_buffer == NULL) {
+	cudaMalloc((void**)&matches_buffer, options_.maxkeypoints * 2 * sizeof(cv::DMatch));
+    }
+
+    MatchGPUDescriptors(cuda_desc, cuda_model_buffer, nump, _matches);//, matches_buffer);
+    
+}
+
 
 /* ************************************************************************* */
 void AKAZE::Show_Computation_Times() const {
