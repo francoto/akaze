@@ -345,7 +345,8 @@ void AKAZE::Init_Model(const cv::Mat& _descriptors) {
     cudaMemset2D(buffer_d, p, 0, p, _descriptors.rows);
     
     cuda_model_buffer = cv::Mat(_descriptors.rows,p,CV_8U,buffer_d);
-    
+
+    std::cout << "desc cols: " << _descriptors.cols << std::endl;
     // Copy mat to cuda buffer
     cudaMemcpy2D(cuda_model_buffer.data, p, _descriptors.data, _descriptors.cols, _descriptors.cols, _descriptors.rows, cudaMemcpyHostToDevice);
 

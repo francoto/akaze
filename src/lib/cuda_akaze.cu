@@ -1789,6 +1789,7 @@ __global__ void MatchDescriptors(unsigned char *d1, unsigned char *d2,
   }
 }
 
+
 void MatchGPUDescriptors(cv::Mat &desc_query, cv::Mat &desc_train, int nump,
 			 std::vector<std::vector<cv::DMatch> > &dmatches) {
 
@@ -1797,13 +1798,25 @@ void MatchGPUDescriptors(cv::Mat &desc_query, cv::Mat &desc_train, int nump,
   cv::DMatch *dmatches_d;
   cudaMalloc(&dmatches_d, desc_query.rows * 2 * sizeof(cv::DMatch));
 
+  unsigned char* t;
+  size_t p;
+  cudaMallocPitch(&t,&p,61,desc_query.rows);
+  cudaMemset2D(t,p,0,61,desc_query.rows);
+  
+//  MatchDescriptors << <block, NTHREADS_MATCH>>>
+//      (desc_train.data, desc_train.data, desc_train.cols, desc_train.rows, dmatches_d);
   MatchDescriptors << <block, NTHREADS_MATCH>>>
-      (desc_query.data, desc_train.data, desc_query.cols, desc_train.rows, dmatches_d);
+      (t, t, p, desc_train.rows, dmatches_d);
+
+  cudaError_t err = cudaGetLastError();
+  std::cout << "Cuda error: " << err << std::endl;
 
   cv::DMatch *dmatches_h = new cv::DMatch[2 * desc_query.rows];
   cudaMemcpy(dmatches_h, dmatches_d, desc_query.rows * 2 * sizeof(cv::DMatch),
              cudaMemcpyDeviceToHost);
 
+
+  
   for (int i = 0; i < desc_query.rows; ++i) {
     std::vector<cv::DMatch> tdmatch;
     tdmatch.push_back(dmatches_h[2 * i]);
