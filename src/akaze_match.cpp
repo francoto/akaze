@@ -25,6 +25,8 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
 
+#include <cuda_runtime.h>
+
 using namespace std;
 using namespace libAKAZECU;
 
@@ -118,11 +120,35 @@ int main(int argc, char *argv[]) {
   evolution2.Feature_Detection(kpts2);
   evolution2.Compute_Descriptors(kpts2, desc2);
 
-  evolution2.Init_Model(desc1);
-  evolution2.Match_Current(dmatches);
+  size_t pitch1, pitch2;
+  unsigned char *descq_d;
+  cudaMallocPitch(&descq_d, &pitch1, 64, desc1.rows);
+  cudaMemset2D(descq_d, pitch1, 0, 64, desc1.rows);
+  cudaMemcpy2D(descq_d, pitch1, desc1.data, desc1.cols,
+  desc1.cols, desc1.rows, cudaMemcpyHostToDevice);
+  unsigned char *desct_d;
+  cudaMallocPitch(&desct_d, &pitch2, 64, desc2.rows);
+  cudaMemset2D(desct_d, pitch2, 0, 64, desc2.rows);
+  cudaMemcpy2D(desct_d, pitch2, desc2.data, desc2.cols,
+               desc2.cols, desc2.rows, cudaMemcpyHostToDevice);
 
-  //MatchDescriptors(desc1,desc2,kpts1.size(),dmatches);
+
+  cv::Mat desc1_mat(desc1.rows,pitch1,CV_8U,descq_d);
+  cv::Mat desc2_mat(desc2.rows,pitch1,CV_8U,desct_d);
   
+  MatchDescriptors(desc1,desc2,desc1.rows,dmatches);
+
+  float closest = 500.0;
+  for (int i=0; i<dmatches.size(); ++i) {
+      closest = min(closest,dmatches[i][0].distance);
+      std::cout << i << ":" << dmatches[i][0].distance << "  ";
+  }
+
+  std::cout << "mindist: " << closest << std::endl;
+  
+  cudaFree(descq_d);
+  cudaFree(desct_d);
+
   t2 = cv::getTickCount();
   takaze = 1000.0*(t2-t1)/cv::getTickFrequency();
 

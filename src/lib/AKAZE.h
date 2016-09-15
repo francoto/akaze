@@ -108,6 +108,8 @@ namespace libAKAZECU {
     /// Display timing information
     void Show_Computation_Times() const;
 
+      const cv::Mat& Get_Desc_GPU();
+
     /// Return the computation times
     AKAZETiming Get_Computation_Times() const {
       return timing_;
@@ -118,7 +120,8 @@ namespace libAKAZECU {
 
       // Matches the model with the current descriptors
       void Match_Current(std::vector<std::vector<cv::DMatch> > &_matches);
-
+      void Match(cv::Mat desc_query, cv::Mat desc_train, int nump, std::vector<std::vector<cv::DMatch> > &_matches);
+      void MatchGPU(cv::Mat desc_query, cv::Mat desc_train, int nump, std::vector<std::vector<cv::DMatch> > &_matches);
       
   };
 

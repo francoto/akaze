@@ -286,6 +286,7 @@ void AKAZE::Compute_Descriptors(std::vector<cv::KeyPoint>& kpts,
       ExtractDescriptors(cuda_points, cuda_buffers, cuda_images,
                          cuda_desc.data, cuda_descbuffer, pattern_size, nump);
       GetDescriptors(desc, cuda_desc, nump);
+      WaitCuda();
 
       break;
     case SURF_UPRIGHT:
@@ -301,6 +302,12 @@ void AKAZE::Compute_Descriptors(std::vector<cv::KeyPoint>& kpts,
 
   WaitCuda();
 }
+
+
+const cv::Mat& AKAZE::Get_Desc_GPU() {
+    return cuda_desc;
+}
+
 
 
 /* ************************************************************************* */
@@ -356,6 +363,19 @@ void AKAZE::Init_Model(const cv::Mat& _descriptors) {
 void AKAZE::Free_Model() {
     cudaFree(cuda_model_buffer.data);
     cuda_model_buffer = cv::Mat();
+}
+
+
+void AKAZE::Match(cv::Mat desc_query, cv::Mat desc_train, int nump, std::vector<std::vector<cv::DMatch> > &_matches) {
+
+    MatchDescriptors(desc_query, desc_train, nump, _matches);
+
+}
+
+void AKAZE::MatchGPU(cv::Mat desc_query, cv::Mat desc_train, int nump, std::vector<std::vector<cv::DMatch> > &_matches) {
+
+    MatchGPUDescriptors(desc_query, desc_train, nump, _matches);
+
 }
 
 

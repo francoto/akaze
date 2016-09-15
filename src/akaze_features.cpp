@@ -103,8 +103,8 @@ int main(int argc, char* argv[]) {
 
   cudaProfilerStop();
 
-  std::vector<std::vector<cv::DMatch> > dmatches;
-  MatchDescriptors(desc, desc, kpts.size(), dmatches);
+  //std::vector<std::vector<cv::DMatch> > dmatches;
+  //MatchDescriptors(desc, desc, kpts.size(), dmatches);
 
   // opencv bruteforce macher
   std::vector<std::vector<cv::DMatch> > cv_matches;
