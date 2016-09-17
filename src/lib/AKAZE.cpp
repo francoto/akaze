@@ -96,7 +96,7 @@ void AKAZE::Allocate_Memory_Evolution() {
     vector<float> tau;
     float ttime = 0.0;
     ttime = evolution_[i].etime - evolution_[i - 1].etime;
-    float tmax = 0.25;// * (1 << 2 * evolution_[i].octave);
+    float tmax = 0.25 * (1 << 2 * evolution_[i].octave);
     naux = fed_tau_by_process_time(ttime, 1, tmax, reordering_, tau);
     nsteps_.push_back(naux);
     tsteps_.push_back(tau);
@@ -170,9 +170,9 @@ int AKAZE::Create_Nonlinear_Scale_Space(const cv::Mat& img) {
     Flow(Lsmooth, Lflow, options_.diffusivity, options_.kcontrast);
 
     for (int j = 0; j < nsteps_[i - 1]; j++) {
-        float stepsize = tsteps_[i - 1][j] / (1 << 2 * evn.octave);
-        // NLDStep(Lt, Lflow, Lstep, stepsize);
-        NLDStep(Lt, Lflow, Lstep, tsteps_[i - 1][j]);
+      float stepsize = tsteps_[i - 1][j] / (1 << 2 * evn.octave);
+       NLDStep(Lt, Lflow, Lstep, stepsize);
+       //NLDStep(Lt, Lflow, Lstep, tsteps_[i - 1][j]);
     }
 
     Lt.h_data = (float*)evn.Lt.data;
@@ -237,7 +237,10 @@ void AKAZE::Feature_Detection(std::vector<cv::KeyPoint>& kpts) {
 
     FindExtrema(Ldet, LdetP, LdetN, border, thresh, i, evolution_[i].octave,
                 size, cuda_points, options_.maxkeypoints);
+    
   }
+
+  
 
   FilterExtrema(cuda_points, cuda_bufferpoints, cuda_ptindices, nump);
 

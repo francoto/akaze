@@ -2,6 +2,8 @@
 #include "cuda_akaze.h"
 #include "cudautils.h"
 
+#include <cuda_fp16.h>
+
 #define CONVROW_W 160
 #define CONVCOL_W 32
 #define CONVCOL_H 40
@@ -761,6 +763,14 @@ __global__ void FindExtrema(float *imd, float *imp, float *imn, int maxx,
   }
 }
 
+
+
+
+void GetExtremaIndices(unsigned int* _idx) {
+  cudaMemcpyFromSymbol(_idx,d_ExtremaIdx,16*sizeof(unsigned int));
+}
+
+
 __global__ void CopyIdxArray(int scale) {
   d_ExtremaIdx[scale] = d_PointCounter[0];
 }
@@ -822,25 +832,31 @@ __forceinline__ __device__ bool atomicCompare(const cv::KeyPoint &i,
 }
 
 struct sortstruct_t {
-  int idx;
-  float x;
-  float y;
+  short idx;
+  __half x;
+  __half y;
+  /*  int idx;
+    float x;
+    float y;*/
 };
 
 __forceinline__ __device__ bool atomicCompare(const sortstruct_t &i,
                                               const sortstruct_t &j) {
-  float t = i.x * j.x;
-  if (t == 0) {
-    if (j.x != 0) {
+  float t = __half2float(i.x)*__half2float(j.x);
+  //float t = i.x*j.x;
+  if (t == 0.f) {
+    if (__half2float(j.x) != 0.f) {
+      //if (j.x != 0.f) {
       return false;
     } else {
       return true;
     }
   }
 
-  if (i.y < j.y) return true;
-
-  if (i.y == j.y && i.x < j.x) return true;
+  //if (i.y<j.y) return true;
+  //if (i.y==j.y && i.x<j.x) return true;
+  if (__half2float(i.y) < __half2float(j.y)) return true;
+  if (__half2float(i.y) == __half2float(j.y) && __half2float(i.x) < __half2float(j.x)) return true;
 
   return false;
 }
@@ -851,9 +867,12 @@ __forceinline__ __device__ void atomicSort(sortstruct_t *pts, int shmidx,
   sortstruct_t &p1 = pts[(shmidx + (offset - sortdir))];
 
   if (atomicCompare(p0, p1)) {
-    int idx = p0.idx;
+    /*int idx = p0.idx;
     float ptx = p0.x;
-    float pty = p0.y;
+    float pty = p0.y;*/
+    short idx = p0.idx;
+    __half ptx = p0.x;
+    __half pty = p0.y;
     p0.idx = p1.idx;
     p0.x = p1.x;
     p0.y = p1.y;
@@ -875,18 +894,20 @@ __global__ void bitonicSort(const T *pts, T *newpts) {
 
   int nkpts = last - first;
 
+  
+
   const cv::KeyPoint *tmpg = &pts[first];
 
   for (int i = threadIdx.x; i < 2 * BitonicSortThreads;
        i += BitonicSortThreads) {
     if (i < nkpts) {
       shm[i].idx = i;
-      shm[i].y = tmpg[i].pt.y;
-      shm[i].x = tmpg[i].pt.x;
+      shm[i].y = __float2half(tmpg[i].pt.y);
+      shm[i].x = __float2half(tmpg[i].pt.x);
     } else {
       shm[i].idx = i;
-      shm[i].y = 0;
-      shm[i].x = 0;
+      shm[i].y = __float2half(0.f);
+      shm[i].x = __float2half(0.f);
     }
   }
   __syncthreads();
@@ -903,7 +924,7 @@ __global__ void bitonicSort(const T *pts, T *newpts) {
   }
 
   cv::KeyPoint *tmpnewg = &newpts[first];
-  for (int i = 0; i < 2 * BitonicSortThreads * sizeof(T) / sizeof(int);
+  for (int i = 0; i < 2 * BitonicSortThreads;
        i += BitonicSortThreads) {
     if (i + threadIdx.x < nkpts) {
       tmpnewg[i + threadIdx.x].angle = tmpg[shm[i + threadIdx.x].idx].angle;
@@ -1191,19 +1212,22 @@ void FilterExtrema(cv::KeyPoint *pts, cv::KeyPoint *newpts, short* kptindices, i
   dim3 threads(BitonicSortThreads, 1, 1);
   bitonicSort << <blocks, threads>>> (pts, newpts);
 
-  std::cout << "sorted points\n";
+  std::cout << "sorted points " << cudaGetLastError() << "\n";
   // Find all neighbors
   cudaStreamSynchronize(copyStream);
   blocks.x = nump;
   threads.x = FindNeighborsThreads;
   FindNeighbors << <blocks, threads>>> (newpts, kptindices, width);
 
-  std::cout << "Found neighbors\n";
+  std::cout << "nump: " << nump << std::endl;
+  std::cout << "Found neighbors " << cudaGetLastError() << "\n";
 
   // Filter extrema
   blocks.x = 1;
   threads.x = FilterExtremaThreads;
   FilterExtrema_kernel << <blocks, threads>>> (newpts, pts, kptindices, width);
+
+  std::cout << "Filter extrema " << cudaGetLastError() << "\n";
 
   cudaMemcpyFromSymbolAsync(&nump, d_PointCounter, sizeof(int));
 

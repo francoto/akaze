@@ -24,3 +24,5 @@ double ExtractDescriptors(cv::KeyPoint *d_pts, std::vector<CudaImage> &cuda_buff
 
 void MatchGPUDescriptors(cv::Mat &desc_query, cv::Mat &desc_train, int nump, std::vector<std::vector<cv::DMatch> > &dmatches);
 void MatchDescriptors(cv::Mat& desc_query, cv::Mat& desc_train, int nump, std::vector<std::vector<cv::DMatch> >& dmatches);
+
+void GetExtremaIndices(unsigned int* _idx);
