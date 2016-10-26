@@ -2,6 +2,8 @@
 #include "cuda_akaze.h"
 #include "cudautils.h"
 
+#include <cuda_fp16.h>
+
 #define CONVROW_W 160
 #define CONVCOL_W 32
 #define CONVCOL_H 40
@@ -819,25 +821,25 @@ __forceinline__ __device__ bool atomicCompare(const cv::KeyPoint &i,
 }
 
 struct sortstruct_t {
-  int idx;
-  float x;
-  float y;
+    short idx;
+    __half x;
+    __half y;
 };
 
 __forceinline__ __device__ bool atomicCompare(const sortstruct_t &i,
                                               const sortstruct_t &j) {
-  float t = i.x * j.x;
-  if (t == 0) {
-    if (j.x != 0) {
-      return false;
-    } else {
-      return true;
+    float t = __half2float(i.x) * __half2float(j.x);
+    if (t == 0) {
+	if (__half2float(j.x) != 0) {
+	    return false;
+	} else {
+	    return true;
+	}
     }
-  }
 
-  if (i.y < j.y) return true;
+    if (__half2float(i.y) < __half2float(j.y)) return true;
 
-  if (i.y == j.y && i.x < j.x) return true;
+    if (__half2float(i.y) == __half2float(j.y) && __half2float(i.x) < __half2float(j.x)) return true;
 
   return false;
 }
@@ -849,8 +851,8 @@ __forceinline__ __device__ void atomicSort(sortstruct_t *pts, int shmidx,
 
   if (atomicCompare(p0, p1)) {
     int idx = p0.idx;
-    float ptx = p0.x;
-    float pty = p0.y;
+    __half ptx = p0.x;
+    __half pty = p0.y;
     p0.idx = p1.idx;
     p0.x = p1.x;
     p0.y = p1.y;
@@ -865,7 +867,7 @@ template <class T>
 __global__ void bitonicSort(const T *pts, T *newpts) {
   int scale = blockIdx.x;
 
-  __shared__ struct sortstruct_t shm[2 * BitonicSortThreads];
+  __shared__ struct sortstruct_t shm[8 * BitonicSortThreads];
 
   int first = scale == 0 ? 0 : d_ExtremaIdx[scale - 1];
   int last = d_ExtremaIdx[scale];
@@ -874,33 +876,47 @@ __global__ void bitonicSort(const T *pts, T *newpts) {
 
   const cv::KeyPoint *tmpg = &pts[first];
 
-  for (int i = threadIdx.x; i < 2 * BitonicSortThreads;
+  for (int i = threadIdx.x; i < 8 * BitonicSortThreads;
        i += BitonicSortThreads) {
     if (i < nkpts) {
       shm[i].idx = i;
-      shm[i].y = tmpg[i].pt.y;
-      shm[i].x = tmpg[i].pt.x;
+      shm[i].y = __float2half(tmpg[i].pt.y);
+      shm[i].x = __float2half(tmpg[i].pt.x);
     } else {
       shm[i].idx = i;
-      shm[i].y = 0;
-      shm[i].x = 0;
+      shm[i].y = __float2half(0.f);
+      shm[i].x = __float2half(0.f);
     }
   }
   __syncthreads();
 
   for (int i = 1; i < 2 * BitonicSortThreads; i <<= 1) {
-    int sortdir = (threadIdx.x & i) > 0 ? 0 : 1;
+      int tx = threadIdx.x;
+      for (int ti=0; ti<4; ++ti) {
+	  int sortdir = (tx & i) > 0 ? 0 : 1;
+	  for (int j = i; j > 0; j >>= 1) {
+	      int mask = 0x0fffffff * j;
+	      int tidx = ((tx & mask) << 1) + (tx & ~mask);
+	      atomicSort(shm, tidx, j, j * sortdir);
+	      __syncthreads();
+	  }
+	  tx += BitonicSortThreads;
+      }
+  }
 
+  /*for (int i = 1; i < 2 * BitonicSortThreads; i <<= 1) {
+    int sortdir = (threadIdx.x & i) > 0 ? 0 : 1;
     for (int j = i; j > 0; j >>= 1) {
       int mask = 0x0fffffff * j;
       int tidx = ((threadIdx.x & mask) << 1) + (threadIdx.x & ~mask);
       atomicSort(shm, tidx, j, j * sortdir);
       __syncthreads();
     }
-  }
+    }*/
+
 
   cv::KeyPoint *tmpnewg = &newpts[first];
-  for (int i = 0; i < 2 * BitonicSortThreads * sizeof(T) / sizeof(int);
+  for (int i = 0; i < 8 * BitonicSortThreads * sizeof(T) / sizeof(int);
        i += BitonicSortThreads) {
     if (i + threadIdx.x < nkpts) {
       tmpnewg[i + threadIdx.x].angle = tmpg[shm[i + threadIdx.x].idx].angle;
@@ -943,7 +959,8 @@ __global__ void FindNeighbors(cv::KeyPoint *pts, short *kptindices, int width) {
 
     if (dist < size * size * 0.25) {
       int idx = atomicAdd(gidx, 1);
-      kptindices[blockIdx.x * width + idx] = i;
+      if (idx<21*21)
+	  kptindices[blockIdx.x * width + idx] = i;
     }
   }
 
@@ -957,15 +974,18 @@ __global__ void FindNeighbors(cv::KeyPoint *pts, short *kptindices, int width) {
 // TODO Intermediate storage of memberarray and minneighbor
 #define FilterExtremaThreads 1024
 __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
-                              short *kptindices, int width) {
+				     short *kptindices, int width,
+				     short *memberarray,
+				     short *minneighbor,
+				     char  *shouldAdd) {
   // -1  means not processed
   // -2  means added but replaced
   // >=0 means added
-  __shared__ short memberarray[8 * 1024];
+  __shared__ short _memberarray[8 * 1024];
   // 8192 means have no neighbor
-  __shared__ short minneighbor[8 * 1024];
+  __shared__ short _minneighbor[8 * 1024];
   // Indicates if we should add the neighbor
-  __shared__ char shouldAdd[8 * 1024];
+  __shared__ char _shouldAdd[8 * 1024];
 
   __shared__ bool shouldBreak[1];
   __shared__ size_t curridx[1];
@@ -974,7 +994,7 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
 
   // Initially all points are unprocessed
   for (int i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
-    memberarray[i] = -1;
+      memberarray[i] = -1;
   }
 
   if (threadIdx.x == 0) {
@@ -985,7 +1005,8 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
   __syncthreads();
 
   // Loop until there are no more points to process
-  while (true) {
+  for (int xx=0; xx<10; ++xx) {
+  //while (true) {
 
       // Outer loop to handle more than 8*1024 points
       // Start by restoring memberarray
@@ -993,12 +1014,15 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
       // for (int offset=0; offset<nump; offset += 8*1024) {
         // memberarray[i] = storedmemberarray[i+offset];
 
-    // Mark all points for addition and no minimum neighbor
-    for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
-      minneighbor[i] = 8*1024;
-      shouldAdd[i] = true;
-    }
-    __syncthreads();
+      //for (int offset=0; offset<nump; offset += 8*1024) {
+
+	  // Mark all points for addition and no minimum neighbor
+      //int maxi = nump-offset >= 8*1024 ? 8*1024 : nump-offset;
+      for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
+	  minneighbor[i] = nump+1;
+	  shouldAdd[i] = true;
+      }
+      __syncthreads();
 
     // Look through all points. If there are points that have not been processed,
     // disable breaking and check if it has no processed neighbors (add), has all processed
@@ -1087,8 +1111,11 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
     __syncthreads();
 
     // End outer loop
-    // storedmemberarray[i+offset] = memberarray[i];
-    // }
+    //for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
+//	storedmemberarray[i+offset] = memberarray[i];
+    //  }
+    // __syncthreads();
+    //}
 
     // Are we done?
     if (shouldBreak[0]) break;
@@ -1179,7 +1206,7 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
 void FilterExtrema(cv::KeyPoint *pts, cv::KeyPoint *newpts, short* kptindices, int& nump) {
 
   //int nump;
-  cudaMemcpyFromSymbolAsync(&nump, d_PointCounter, sizeof(int));
+  cudaMemcpyFromSymbol(&nump, d_PointCounter, sizeof(int));
 
   int width = ceil(21) * ceil(21);
 
@@ -1187,21 +1214,39 @@ void FilterExtrema(cv::KeyPoint *pts, cv::KeyPoint *newpts, short* kptindices, i
   dim3 blocks(16, 1, 1);
   dim3 threads(BitonicSortThreads, 1, 1);
   bitonicSort << <blocks, threads>>> (pts, newpts);
+  cudaDeviceSynchronize();
+  safeCall(cudaGetLastError());
 
-  std::cout << "sorted points\n";
+  cv::KeyPoint* newpts_h = new cv::KeyPoint[nump];
+  cudaMemcpy(newpts_h,newpts,nump*sizeof(cv::KeyPoint),cudaMemcpyDeviceToHost);
+
+  /*for (int i=0; i<nump; ++i) {
+      std::cout << i << ": " << newpts_h[i].pt.y << " " << newpts_h[i].pt.x << std::endl;
+      }*/
+  
   // Find all neighbors
   cudaStreamSynchronize(copyStream);
-  blocks.x = nump;
+  blocks.x = 1024;//nump;
   threads.x = FindNeighborsThreads;
   FindNeighbors << <blocks, threads>>> (newpts, kptindices, width);
-
-  std::cout << "Found neighbors\n";
-
+  cudaDeviceSynchronize();
+  safeCall(cudaGetLastError());
+  
   // Filter extrema
   blocks.x = 1;
   threads.x = FilterExtremaThreads;
-  FilterExtrema_kernel << <blocks, threads>>> (newpts, pts, kptindices, width);
-
+  short *buffer1, *buffer2;
+  cudaMalloc((void**)&buffer1, nump*sizeof(short));
+  cudaMalloc((void**)&buffer2, nump*sizeof(short));
+  char* buffer3;
+  cudaMalloc((void**)&buffer3, nump);
+  FilterExtrema_kernel << <blocks, threads>>> (newpts, pts, kptindices, width,
+					       buffer1, buffer2, buffer3);
+  cudaDeviceSynchronize();
+  safeCall(cudaGetLastError());
+  cudaFree(buffer1);
+  cudaFree(buffer2);
+  cudaFree(buffer3);
   cudaMemcpyFromSymbolAsync(&nump, d_PointCounter, sizeof(int));
 
 }
@@ -1805,8 +1850,7 @@ void MatchDescriptors(cv::Mat &desc_query, cv::Mat &desc_train,
   cv::DMatch *dmatches_d;
   cudaMalloc(&dmatches_d, desc_query.rows * 2 * sizeof(cv::DMatch));
 
-  MatchDescriptors << <block, NTHREADS_MATCH>>>
-      (descq_d, desct_d, pitch1, desc_train.rows, dmatches_d);
+  MatchDescriptors << <block, NTHREADS_MATCH>>>(descq_d, desct_d, pitch1, desc_train.rows, dmatches_d);
 
   cv::DMatch *dmatches_h = new cv::DMatch[2 * desc_query.rows];
   cudaMemcpy(dmatches_h, dmatches_d, desc_query.rows * 2 * sizeof(cv::DMatch),
@@ -1814,6 +1858,7 @@ void MatchDescriptors(cv::Mat &desc_query, cv::Mat &desc_train,
 
   for (int i = 0; i < desc_query.rows; ++i) {
     std::vector<cv::DMatch> tdmatch;
+    std::cout << dmatches_h[2*i].trainIdx << " - " << dmatches_h[2*i].queryIdx << std::endl;
     tdmatch.push_back(dmatches_h[2 * i]);
     tdmatch.push_back(dmatches_h[2 * i + 1]);
     dmatches.push_back(tdmatch);
