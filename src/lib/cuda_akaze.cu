@@ -122,6 +122,7 @@ double SeparableFilter(CudaImage &inimg, CudaImage &outimg, CudaImage &temp,
   int pitch = inimg.pitch;
   int height = inimg.height;
   float *d_DataA = inimg.d_data;
+
   float *d_DataB = outimg.d_data;
   float *d_Temp = temp.d_data;
   if (d_DataA == NULL || d_DataB == NULL || d_Temp == NULL) {
@@ -1023,8 +1024,8 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
   __syncthreads();
 
   // Loop until there are no more points to process
-  for (int xx=0; xx<10; ++xx) {
-  //while (true) {
+  //for (int xx=0; xx<10000; ++xx) {
+      while (true) {
 
       // Outer loop to handle more than 8*1024 points
       // Start by restoring memberarray
@@ -1111,7 +1112,7 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
 
     // Look at the neighbors. If the response is higher, replace
     for (size_t i = threadIdx.x; i < nump; i += FilterExtremaThreads) {
-      if (minneighbor[i] != 8*1024) {
+      if (minneighbor[i] != nump+1) {
         if (memberarray[minneighbor[i]] == -1) {
           if (!shouldAdd[minneighbor[i]]) {
             const cv::KeyPoint &p0 = kpts[minneighbor[i]];
@@ -1233,12 +1234,11 @@ void FilterExtrema(cv::KeyPoint *pts, cv::KeyPoint *newpts, short* kptindices, i
   dim3 threads(BitonicSortThreads, 1, 1);
   bitonicSort << <blocks, threads>>> (pts, newpts);
 
-  /*unsigned int extremaidx_h[16];
+  unsigned int extremaidx_h[16];
   cudaMemcpyFromSymbol(extremaidx_h,d_ExtremaIdx,16*sizeof(unsigned int));
-  for (int i=0; i<16; ++i) {
-      std::cout << i << ": " << extremaidx_h[i] << std::endl;
+  for (int i=0; i<1; ++i) {
+      std::cout << "level " << i << ": " << extremaidx_h[i] << std::endl;
   }
-  */
   
 /*  cv::KeyPoint* newpts_h = new cv::KeyPoint[nump];
   cudaMemcpy(newpts_h,newpts,nump*sizeof(cv::KeyPoint),cudaMemcpyDeviceToHost);
