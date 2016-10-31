@@ -3,14 +3,18 @@ This is a fork of libAKAZE with modifications to run it on the GPU using CUDA. T
 
 The interface is the same as the original version. Just changing namespace from libAKAZE to libAKAZECU should be enough. Keypoins and descriptors are returned on the CPU for later matching etc. using e.g. OpenCV. We also provide a rudimentary brute force matcher running on the GPU.
 
-For a detailed description, please refer to `https://github.com/pablofdezalc/akaze`
+For a detailed description, please refer to <https://github.com/pablofdezalc/akaze>
 
-This code was created as a joint effort between Mårten Björkman `https://github.com/Celebrandil` and Alessandro Pieropan `https://github.com/CoffeRobot`.
+This code was created as a joint effort between
+
+- Mårten Björkman <https://github.com/Celebrandil>
+- Alessandro Pieropan <https://github.com/CoffeRobot>
 
 
 ## Optimizations
 The code has been optimized with the goal to maintain ths same interface as well as to produce the same results as the original code. This means that certain tradeoffs have been necessary, in particular in the way keypoints are filtered. One difference remain though related to finding scale space extrema, which has been reported as an issue here:
-https://github.com/pablofdezalc/akaze/issues/24
+
+<https://github.com/pablofdezalc/akaze/issues/24>
 
 Major optimizations are possible, but this is work in progress. These optimizations will relax the constraint to have identical results as the original code.
 
@@ -25,12 +29,12 @@ The following benchmarks are measured on the img1.pgm in the iguazu dataset prov
 | Descriptor    |            10            |    0.9    |
 
 ## Limitations
-- The CUDA version currently comes with some limitations. The maximum number of detected keypoints **before** filtering is 8192, and the maximum number per level is 2048. This constraint might be relatex in future updates. 
-- The only descriptor available is MLDB, as proposed in the original authors' paper (2)
-- Currently it only works with 4 octaves and 4 sub-levels (default settings)
+- The CUDA version currently comes with some limitations. The maximum number of detected keypoints _before_ filtering is 8192, and the maximum number per level is 2048. This constraint might be relatex in future updates. 
+- The only descriptor available is MLDB, as proposed in the original authors' paper.
+- Currently it only works with 4 octaves and 4 sub-levels (default settings).
 
 ## Citation
-If you use this code as part of your work, please cite the following papers:
+If you use this code as part of your research, please cite the following papers:
 
 CUDA version
 
@@ -45,8 +49,9 @@ Original A-KAZE papers
 
 ## CPU Implementations
 If the GPU implementation isn't an option for you, have a look at the CPU-versions below
-- `https://github.com/pablofdezalc/akaze`, the original code
-- `https://github.com/h2suzuki/fast_akaze`, a faster implementation of the original code
+
+- <https://github.com/pablofdezalc/akaze>, the original code
+- <https://github.com/h2suzuki/fast_akaze>, a faster implementation of the original code
 
 
 ## MATLAB interface
@@ -57,5 +62,5 @@ This will presumably not work, but might only require a few modifications. If so
 ## Contact Info
 If you have questions, or are finding this code useful, please let me know!
 
-Niklas Bergström
+Niklas Bergström,
 email: nbergst@gmail.com
