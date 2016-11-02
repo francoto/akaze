@@ -1153,12 +1153,12 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
   upper *= 2048;
 
   int offset = 0;
-  for (short i = threadIdx.x; i < upper; i += 2 * FilterExtremaThreads) {
+  for (int i = threadIdx.x; i < upper; i += 2 * FilterExtremaThreads) {
     minneighbor[threadIdx.x] =
-        i >= nump ? 10001 : (memberarray[i] < 0 ? 10001 : (kpts[memberarray[i]].size < 0 ? 10001 : memberarray[i]));
+        i >= nump ? nump+1 : (memberarray[i] < 0 ? nump+1 : (kpts[memberarray[i]].size < 0 ? nump+1 : memberarray[i]));
     minneighbor[threadIdx.x + 1024] =
-        i + 1024 >= nump ? 10001
-                         : (memberarray[i + 1024] < 0 ? 10001 : (kpts[memberarray[i+1024]].size < 0 ? 10001 : memberarray[i+1024]));
+        i + 1024 >= nump ? nump+1
+                         : (memberarray[i + 1024] < 0 ? nump+1 : (kpts[memberarray[i+1024]].size < 0 ? nump+1 : memberarray[i+1024]));
 
     __syncthreads();
 
@@ -1177,7 +1177,7 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
     __syncthreads();
 
     for (int k = threadIdx.x; k < 2048; k += 1024) {
-      if (minneighbor[k] < 10000) {
+      if (minneighbor[k] < nump) {
           // Restore subpixel component
           float octsub = fabs(*(float*)(&kpts[minneighbor[k]].octave));
           int octave = (int)octsub;
@@ -1197,17 +1197,17 @@ __global__ void FilterExtrema_kernel(cv::KeyPoint *kpts, cv::KeyPoint *newkpts,
     offset += 2048;
 
     // How many did we add?
-    if (minneighbor[2047] < 10000) {
+    if (minneighbor[2047] < nump) {
       curridx[0] += 2048;
     } else {
-      if (minneighbor[1024] < 10000) {
-        if (threadIdx.x < 1023 && minneighbor[1024 + threadIdx.x] < 10000 &&
-            minneighbor[1024 + threadIdx.x + 1] == 10001) {
+      if (minneighbor[1024] < nump) {
+        if (threadIdx.x < 1023 && minneighbor[1024 + threadIdx.x] < nump &&
+            minneighbor[1024 + threadIdx.x + 1] == nump+1) {
           curridx[0] += 1024 + threadIdx.x + 1;
         }
       } else {
-        if (minneighbor[threadIdx.x] < 10000 &&
-            minneighbor[threadIdx.x + 1] == 10001) {
+        if (minneighbor[threadIdx.x] < nump &&
+            minneighbor[threadIdx.x + 1] == nump+1) {
           curridx[0] += threadIdx.x + 1;
         }
       }
@@ -1691,6 +1691,41 @@ __global__ void BuildDescriptor(float *_valsim, unsigned char *_desc) {
   }
 }
 
+
+double ExtractDescriptors(cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, CudaImage *d_imgs,
+                          unsigned char *desc_d, float* vals_d, int patsize, int numPts) {
+  int size2 = patsize;
+  int size3 = ceil(2.0f * patsize / 3.0f);
+  int size4 = ceil(0.5f * patsize);
+  //int numPts;
+  //cudaMemcpyFromSymbol(&numPts, d_PointCounter, sizeof(int));
+
+  std::cout << "building descripor for " << numPts << " points\n";
+
+  // TimerGPU timer0(0);
+  dim3 blocks(numPts);
+  dim3 threads(EXTRACT_S);
+
+  ExtractDescriptors << <blocks, threads>>>(d_pts, d_imgs, vals_d, size2, size3, size4);
+
+
+  cudaMemsetAsync(desc_d, 0, numPts * 61);
+  BuildDescriptor << <blocks, 64>>> (vals_d, desc_d);
+
+
+  ////checkMsg("ExtractDescriptors() execution failed\n");
+  // safeCall(cudaThreadSynchronize());
+  double gpuTime = 0;  // timer0.read();
+#ifdef VERBOSE
+  printf("ExtractDescriptors time =     %.2f ms\n", gpuTime);
+#endif
+
+  return gpuTime;
+}
+
+
+
+
 #define NTHREADS_MATCH 32
 __global__ void MatchDescriptors(unsigned char *d1, unsigned char *d2,
                                  int pitch, int nkpts_2, cv::DMatch *matches) {
@@ -1986,37 +2021,6 @@ void InitCompareIndices() {
 
 }
 
-
-double ExtractDescriptors(cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, CudaImage *d_imgs,
-                          unsigned char *desc_d, float* vals_d, int patsize, int numPts) {
-  int size2 = patsize;
-  int size3 = ceil(2.0f * patsize / 3.0f);
-  int size4 = ceil(0.5f * patsize);
-  //int numPts;
-  //cudaMemcpyFromSymbol(&numPts, d_PointCounter, sizeof(int));
-
-  std::cout << "building descripor for " << numPts << " points\n";
-
-  // TimerGPU timer0(0);
-  dim3 blocks(numPts);
-  dim3 threads(EXTRACT_S);
-
-  ExtractDescriptors << <blocks, threads>>>(d_pts, d_imgs, vals_d, size2, size3, size4);
-
-
-  cudaMemsetAsync(desc_d, 0, numPts * 61);
-  BuildDescriptor << <blocks, 64>>> (vals_d, desc_d);
-
-
-  ////checkMsg("ExtractDescriptors() execution failed\n");
-  // safeCall(cudaThreadSynchronize());
-  double gpuTime = 0;  // timer0.read();
-#ifdef VERBOSE
-  printf("ExtractDescriptors time =     %.2f ms\n", gpuTime);
-#endif
-
-  return gpuTime;
-}
 
 __global__ void FindOrientation(cv::KeyPoint *d_pts, CudaImage *d_imgs) {
   __shared__ float resx[42], resy[42];
