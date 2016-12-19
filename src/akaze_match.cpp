@@ -25,6 +25,8 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
 
+#include <cuda_profiler_api.h>
+
 using namespace std;
 using namespace libAKAZECU;
 
@@ -110,6 +112,8 @@ int main(int argc, char *argv[]) {
 
   t1 = cv::getTickCount();
 
+  cudaProfilerStart();
+  
   evolution1.Create_Nonlinear_Scale_Space(img1_32);
   evolution1.Feature_Detection(kpts1);
   evolution1.Compute_Descriptors(kpts1, desc1);
@@ -128,13 +132,22 @@ int main(int argc, char *argv[]) {
 
   t1 = cv::getTickCount();
 
+  MatchDescriptors(desc1, desc2, dmatches);
+
+  cudaProfilerStop();
+  
+  t2 = cv::getTickCount();
+  tmatch = 1000.0*(t2 - t1)/ cv::getTickFrequency();
+
+  /*t1 = cv::getTickCount();
+
   if (options.descriptor < MLDB_UPRIGHT)
     matcher_l2->knnMatch(desc1, desc2, dmatches, 2);
   else
     matcher_l1->knnMatch(desc1, desc2, dmatches, 2);
 
   t2 = cv::getTickCount();
-  tmatch = 1000.0*(t2 - t1)/ cv::getTickFrequency();
+  tmatch = 1000.0*(t2 - t1)/ cv::getTickFrequency();*/
 
   // Compute Inliers!!
   matches2points_nndr(kpts1, kpts2, dmatches, matches, DRATIO);
