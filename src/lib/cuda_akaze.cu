@@ -1236,9 +1236,9 @@ void FilterExtrema(cv::KeyPoint *pts, cv::KeyPoint *newpts, short* kptindices, i
 
   unsigned int extremaidx_h[16];
   cudaMemcpyFromSymbol(extremaidx_h,d_ExtremaIdx,16*sizeof(unsigned int));
-  for (int i=0; i<1; ++i) {
+  /*for (int i=0; i<1; ++i) {
       std::cout << "level " << i << ": " << extremaidx_h[i] << std::endl;
-  }
+      }*/
   
 /*  cv::KeyPoint* newpts_h = new cv::KeyPoint[nump];
   cudaMemcpy(newpts_h,newpts,nump*sizeof(cv::KeyPoint),cudaMemcpyDeviceToHost);
@@ -1700,8 +1700,6 @@ double ExtractDescriptors(cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, C
   //int numPts;
   //cudaMemcpyFromSymbol(&numPts, d_PointCounter, sizeof(int));
 
-  std::cout << "building descripor for " << numPts << " points\n";
-
   // TimerGPU timer0(0);
   dim3 blocks(numPts);
   dim3 threads(EXTRACT_S);
@@ -2078,8 +2076,6 @@ __global__ void FindOrientation(cv::KeyPoint *d_pts, CudaImage *d_imgs) {
 }
 
 double FindOrientation(cv::KeyPoint *d_pts, std::vector<CudaImage> &h_imgs, CudaImage *d_imgs, int numPts) {
-
-    std::cout << "numpts: " << numPts << std::endl;
 
   safeCall(cudaMemcpyAsync(d_imgs, (float *)&h_imgs[0],
                            sizeof(CudaImage) * h_imgs.size(),
