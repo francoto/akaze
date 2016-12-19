@@ -1,7 +1,7 @@
 ## README - A-KAZE Features
 This is a fork of libAKAZE with modifications to run it on the GPU using CUDA. The working branch is `cpuidentity`
 
-The interface is the same as the original version. Just changing namespace from libAKAZE to libAKAZECU should be enough. Keypoins and descriptors are returned on the CPU for later matching etc. using e.g. OpenCV. We also provide a rudimentary brute force matcher running on the GPU.
+The interface is the same as the original version. Just changing namespace from libAKAZE to libAKAZECU should be enough. Keypoints and descriptors are returned on the CPU for later matching etc. using e.g. OpenCV. We also provide a rudimentary brute force matcher running on the GPU.
 
 For a detailed description, please refer to <https://github.com/pablofdezalc/akaze>
 
@@ -12,11 +12,11 @@ This code was created as a joint effort between
 
 
 ## Optimizations
-The code has been optimized with the goal to maintain ths same interface as well as to produce the same results as the original code. This means that certain tradeoffs have been necessary, in particular in the way keypoints are filtered. One difference remain though related to finding scale space extrema, which has been reported as an issue here:
+The code has been optimized with the goal to maintain the same interface as well as to produce the same results as the original code. This means that certain tradeoffs have been necessary, in particular in the way keypoints are filtered. One difference remains though related to finding scale space extrema, which has been reported as an issue here:
 
 <https://github.com/pablofdezalc/akaze/issues/24>
 
-Major optimizations are possible, but this is work in progress. These optimizations will relax the constraint to have identical results as the original code.
+Major optimizations are possible, but this is work in progress. These optimizations will relax the constraint of having results that are identical to the original code.
 
 
 
@@ -29,7 +29,7 @@ The following benchmarks are measured on the img1.pgm in the iguazu dataset prov
 | Descriptor    |            10            |    0.9    |
 
 ## Limitations
-- The CUDA version currently comes with some limitations. The maximum number of detected keypoints _before_ filtering is 8192, and the maximum number per level is 2048. This constraint might be relatex in future updates. 
+- The CUDA version currently comes with some limitations. The maximum number of detected keypoints _before_ filtering is 8196 points per level. This constraint might be relatex in future updates. 
 - The only descriptor available is MLDB, as proposed in the original authors' paper.
 - Currently it only works with 4 octaves and 4 sub-levels (default settings).
 
@@ -51,7 +51,7 @@ Original A-KAZE papers
 If the GPU implementation isn't an option for you, have a look at the CPU-versions below
 
 - <https://github.com/pablofdezalc/akaze>, the original code
-- <https://github.com/h2suzuki/fast_akaze>, a faster implementation of the original code
+- <https://github.com/h2suzuki/fast_akaze>, a faster implementation of the original code.
 
 
 ## MATLAB interface
