@@ -110,6 +110,9 @@ struct AKAZEOptions {
     maxkeypoints = 16*8192;
   }
 
+    void setWidth(int w) {img_width=w;}
+    void setHeight(int h) {img_height=h;}
+    
   int omin;                       ///< Initial octave level (-1 means that the size of the input image is duplicated)
   int omax;                       ///< Maximum octave evolution of the image 2^sigma (coarsest scale sigma units)
   int nsublevels;                 ///< Default number of sublevels per scale level

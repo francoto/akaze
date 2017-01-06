@@ -176,9 +176,46 @@ int AKAZE::Create_Nonlinear_Scale_Space(const cv::Mat& img) {
 
   t2 = cv::getTickCount();
   timing_.scale = 1000.0 * (t2 - t1) / cv::getTickFrequency();
-
+  
   return 0;
 }
+
+
+void kpvec2mat(std::vector<cv::KeyPoint>& kpts, cv::Mat& _mat) {
+
+    _mat = cv::Mat(kpts.size(),7,CV_32FC1);
+    for (int i=0; i<(int)kpts.size(); ++i) {
+
+
+    }
+    
+}
+
+
+void mat2kpvec(cv::Mat& _mat, std::vector<cv::KeyPoint>& _kpts) {
+
+    for (int i=0; i<_mat.rows; ++i) {
+	cv::Vec<float,7> v = _mat.at<cv::Vec<float,7> >(i,0);
+	cv::KeyPoint kp(v[0],v[1],v[2],v[3],v[4],(int)v[5],(int)v[6]);
+	_kpts.push_back(kp);
+    }
+    
+}
+
+
+
+cv::Mat AKAZE::Feature_Detection_() {
+
+    std::vector<cv::KeyPoint> kpts;
+
+    this->Feature_Detection(kpts);
+
+    cv::Mat mat;
+    kpvec2mat(kpts,mat);
+
+    return mat;
+}
+
 
 /* ************************************************************************* */
 void AKAZE::Feature_Detection(std::vector<cv::KeyPoint>& kpts) {
@@ -244,6 +281,19 @@ void AKAZE::Feature_Detection(std::vector<cv::KeyPoint>& kpts) {
   timing_.extrema = 1000.0 * (t3 - t2) / cv::getTickFrequency();
   timing_.detector = 1000.0 * (t3 - t1) / cv::getTickFrequency();
 }
+
+
+cv::Mat AKAZE::Compute_Descriptors_(cv::Mat& _mat) {
+
+    std::vector<cv::KeyPoint> kpts;
+    mat2kpvec(_mat,kpts);
+    cv::Mat desc;
+    this->Compute_Descriptors(kpts,desc);
+    
+    return desc;
+
+}
+
 
 /* ************************************************************************* */
 /**

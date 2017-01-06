@@ -22,7 +22,7 @@
 /* ************************************************************************* */
 namespace libAKAZECU {
 
-  class AKAZE {
+    class AKAZE {
 
   private:
 
@@ -49,7 +49,7 @@ namespace libAKAZECU {
     cv::KeyPoint *cuda_bufferpoints;
     cv::Mat cuda_desc;
     float* cuda_descbuffer;
-    short* cuda_ptindices;
+    int* cuda_ptindices;
     CudaImage *cuda_images;
     std::vector<CudaImage> cuda_buffers;
     int nump;
@@ -74,6 +74,7 @@ namespace libAKAZECU {
 
     /// @brief This method selects interesting keypoints through the nonlinear scale space
     /// @param kpts Vector of detected keypoints
+	cv::Mat Feature_Detection_();
     void Feature_Detection(std::vector<cv::KeyPoint>& kpts);
 
     /// This method computes the feature detector response for the nonlinear scale space
@@ -90,7 +91,8 @@ namespace libAKAZECU {
     void Do_Subpixel_Refinement(std::vector<cv::KeyPoint>& kpts);
 
     /// Feature description methods
-    void Compute_Descriptors(std::vector<cv::KeyPoint>& kpts, cv::Mat& desc);
+	cv::Mat Compute_Descriptors_(cv::Mat& kpts);
+	void Compute_Descriptors(std::vector<cv::KeyPoint>& kpts, cv::Mat& desc);
 
     /// This method saves the scale space into jpg images
     void Save_Scale_Space();
