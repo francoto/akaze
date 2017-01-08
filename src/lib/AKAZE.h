@@ -19,6 +19,10 @@
 // OpenCV
 #include <opencv2/features2d/features2d.hpp>
 
+// Boost
+#include <boost/python.hpp>
+
+
 /* ************************************************************************* */
 namespace libAKAZECU {
 
@@ -91,7 +95,7 @@ namespace libAKAZECU {
     void Do_Subpixel_Refinement(std::vector<cv::KeyPoint>& kpts);
 
     /// Feature description methods
-	cv::Mat Compute_Descriptors_(cv::Mat& kpts);
+	boost::python::tuple Compute_Descriptors_();
 	void Compute_Descriptors(std::vector<cv::KeyPoint>& kpts, cv::Mat& desc);
 
     /// This method saves the scale space into jpg images

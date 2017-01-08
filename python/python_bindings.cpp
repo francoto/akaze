@@ -14,10 +14,8 @@ namespace libakaze_pybindings {
     static void init_ar(){
 	Py_Initialize();
 	import_array();
-	return NUMPY_IMPORT_ARRAY_RETVAL;
     }
 
-  
     
     BOOST_PYTHON_MODULE(libakaze_pybindings)
     {
@@ -34,7 +32,7 @@ namespace libakaze_pybindings {
 	class_<AKAZE>("AKAZE", init<AKAZEOptions>())
 	    .def("Create_Nonlinear_Scale_Space", &AKAZE::Create_Nonlinear_Scale_Space)
 	    .def("Feature_Detection",&AKAZE::Feature_Detection_)
-	    .def("Compute_Descriptors",&AKAZE::Compute_Descriptors_)		                             
+	    .def("Compute_Descriptors",&AKAZE::Compute_Descriptors_)
 	    ;
 	
 	

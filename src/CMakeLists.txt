@@ -4,6 +4,12 @@ find_package(OpenCV REQUIRED)
 find_package(Doxygen)
 find_package(CUDA)
 
+find_package(Boost COMPONENTS python)
+include_directories(${Boost_INCLUDE_DIR})
+
+find_package(PythonLibs REQUIRED)
+include_directories(${PYTHON_INCLUDE_DIRS})
+
 if (NOT APPLE)
   find_package(OpenMP)
 endif ()
@@ -51,7 +57,7 @@ set(AKAZE_SRCS
     lib/utils.h                  lib/utils.cpp)
  
 add_library(AKAZE ${AKAZE_SRCS})
-target_link_libraries(AKAZE ${OpenCV_LIBS})
+target_link_libraries(AKAZE ${OpenCV_LIBS} ${Boost_PYTHON_LIBRARY} ${PYTHON_LIBRARIES})
 
 SET(AKAZE_CUDA_SRCS
   lib/cudaImage.cu lib/cuda_akaze.cu)
@@ -75,7 +81,7 @@ target_link_libraries(akaze_compare AKAZE AKAZE_CUDA)
 
 # ============================================================================ #
 # Library installation
-install(TARGETS AKAZE AKAZE_CUDA DESTINATION ${AKAZE_INSTALL_PREFIX})
+install(TARGETS AKAZE AKAZE_CUDA DESTINATION lib)
 install(FILES
     lib/AKAZE.h
     lib/fed.h
@@ -86,7 +92,7 @@ install(FILES
     lib/cuda_akaze.h
     lib/cudautils.h
     DESTINATION
-    ${AKAZE_INCLUDE_PREFIX}
+    include
 )
 
 # ============================================================================ #
