@@ -26,6 +26,32 @@
 /* ************************************************************************* */
 namespace libAKAZECU {
 
+    class Matcher {
+	
+    private:
+	int maxnquery;
+	unsigned char* descq_d;
+
+	int maxntrain;
+	unsigned char* desct_d;
+
+	cv::DMatch* dmatches_d;
+	cv::DMatch* dmatches_h;
+
+	size_t pitch;
+	
+    public:
+	Matcher() : maxnquery(0), descq_d(NULL), maxntrain(0), desct_d(NULL),
+	    dmatches_d(0), dmatches_h(0), pitch(0) {}
+
+	~Matcher();
+	
+	void bfmatch(cv::Mat &desc_query, cv::Mat &desc_train,
+		     std::vector<std::vector<cv::DMatch> > &dmatches);
+	
+    };
+
+
     class AKAZE {
 
   private:

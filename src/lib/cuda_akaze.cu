@@ -1867,6 +1867,7 @@ __global__ void MatchDescriptors(unsigned char *d1, unsigned char *d2,
     if (i + x < nkpts_2) {
       // Check d1[p] with d2[i]
       int score = 0;
+#pragma unroll
       for (int j = 0; j < 8; ++j) {
         score += __popcll(d1i[j] ^ d2i[j]);
       }
@@ -1964,6 +1965,29 @@ __global__ void MatchDescriptors(unsigned char *d1, unsigned char *d2,
     matches[2 * p + 1].trainIdx = idxSecondBest[x];
     matches[2 * p + 1].distance = scoreSecondBest[x];
   }
+}
+
+
+void MatchDescriptors(cv::Mat &desc_query, cv::Mat &desc_train,
+		      std::vector<std::vector<cv::DMatch> > &dmatches,
+		      size_t pitch, 
+		      unsigned char* descq_d, unsigned char* desct_d, cv::DMatch* dmatches_d, cv::DMatch* dmatches_h) {
+
+    dim3 block(desc_query.rows);
+    
+    MatchDescriptors << <block, NTHREADS_MATCH>>>(descq_d, desct_d, pitch, desc_train.rows, dmatches_d);
+
+    cudaMemcpy(dmatches_h, dmatches_d, desc_query.rows * 2 * sizeof(cv::DMatch),
+	       cudaMemcpyDeviceToHost);
+
+    for (int i = 0; i < desc_query.rows; ++i) {
+	std::vector<cv::DMatch> tdmatch;
+	//std::cout << dmatches_h[2*i].trainIdx << " - " << dmatches_h[2*i].queryIdx << std::endl;
+	tdmatch.push_back(dmatches_h[2 * i]);
+	tdmatch.push_back(dmatches_h[2 * i + 1]);
+	dmatches.push_back(tdmatch);
+    }
+    
 }
 
 

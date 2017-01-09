@@ -132,8 +132,17 @@ int main(int argc, char *argv[]) {
 
   t1 = cv::getTickCount();
 
-  MatchDescriptors(desc1, desc2, dmatches);
+  Matcher cuda_matcher;
 
+  cuda_matcher.bfmatch(desc1, desc2, dmatches);
+  cuda_matcher.bfmatch(desc2, desc1, dmatches);
+  //MatchDescriptors(desc1, desc2, dmatches);
+
+
+  std::cout << "#matches: " << dmatches.size() << std::endl;
+  std::cout << "#kptsq:   " << kpts1.size() << std::endl;
+  std::cout << "#kptst:   " << kpts2.size() << std::endl;
+  
   cudaProfilerStop();
   
   t2 = cv::getTickCount();
@@ -150,7 +159,7 @@ int main(int argc, char *argv[]) {
   tmatch = 1000.0*(t2 - t1)/ cv::getTickFrequency();*/
 
   // Compute Inliers!!
-  matches2points_nndr(kpts1, kpts2, dmatches, matches, DRATIO);
+  matches2points_nndr(kpts2, kpts1, dmatches, matches, DRATIO);
 
   if (use_ransac == false)
     compute_inliers_homography(matches, inliers, HG, MIN_H_ERROR);
