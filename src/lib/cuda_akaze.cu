@@ -1387,7 +1387,6 @@ CHK
   cudaMalloc((void**)&buffer2, nump*sizeof(int));
   char* buffer3;
   cudaMalloc((void**)&buffer3, nump);
-  std::cout << "nump: " << nump << std::endl;
   FilterExtrema_kernel << <blocks, threads>>> (newpts, pts, kptindices, width,
 					       buffer1, buffer2, buffer3);
   threads.x = 1024;
