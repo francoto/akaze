@@ -54,6 +54,10 @@ If the GPU implementation isn't an option for you, have a look at the CPU-versio
 - <https://github.com/h2suzuki/fast_akaze>, a faster implementation of the original code.
 
 
+## Python interface
+I'm just a novice python user, so I cannot say much about the quality of this code. Anyway, I put together a python interface using boost::python, and pyboostcvconverter <https://github.com/Algomorph/pyboostcvconverter> and wrote a small test script computing akaze for two images and then matching the descriptors. The interface resides in the python-directory and has its own cmake project. It is tested on Ubuntu 14.04 with boost 1.61 and python 2.7. It assumes that akaze is installed in /usr/local. **Important:** For it to work you need to copy the libakaze_pybindings.so to /usr/local/python2.7/dist-packages. Run test.py from the build directory, i.e. cd <AKAZEROOT>/python/build; python test.py. Suggestions on improvements of pull requests are appreciated.
+
+
 ## MATLAB interface
 
 This will presumably not work, but might only require a few modifications. If someone is interested, fork the repository and create a pull-request.
