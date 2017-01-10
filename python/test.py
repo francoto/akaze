@@ -30,15 +30,9 @@ evolution2 = akaze.AKAZE(options)
 evolution1.Create_Nonlinear_Scale_Space(img1_32)
 desc1,kpts1 = evolution1.Compute_Descriptors()
 
-x,y = np.shape(kpts1)
-print(x)
-print(y)
-x,y = np.shape(desc1)
-print(x)
-print(y)
-
-
-
 evolution2.Create_Nonlinear_Scale_Space(img2_32)
 desc2,kpts2 = evolution2.Compute_Descriptors()
+
+matcher = akaze.Matcher()
+dmatch = matcher.BFMatch(desc1,desc2)
 

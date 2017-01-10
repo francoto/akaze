@@ -34,6 +34,10 @@ namespace libakaze_pybindings {
 	    .def("Feature_Detection",&AKAZE::Feature_Detection_)
 	    .def("Compute_Descriptors",&AKAZE::Compute_Descriptors_)
 	    ;
+
+	class_<Matcher>("Matcher")
+	    .def("BFMatch",&Matcher::bfmatch_)
+	    ;
 	
 	
     }

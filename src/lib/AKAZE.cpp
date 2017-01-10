@@ -78,6 +78,33 @@ void Matcher::bfmatch(cv::Mat &desc_query, cv::Mat &desc_train,
     
 }
 
+
+cv::Mat Matcher::bfmatch_(cv::Mat desc_query, cv::Mat desc_train) {
+
+    std::vector<std::vector<cv::DMatch> > dmatches_vec;
+
+    bfmatch(desc_query, desc_train, dmatches_vec);
+    
+    cv::Mat dmatches_mat(dmatches_vec.size(), 8, CV_32FC1);
+
+    for (int i=0; i<dmatches_vec.size(); ++i) {
+	float* mdata = (float*)&dmatches_mat.data[i*8*sizeof(float)];
+
+	mdata[0] = dmatches_vec[i][0].queryIdx;
+	mdata[1] = dmatches_vec[i][0].trainIdx;
+	mdata[2] = 0.f;//dmatches_vec[i][0].imgIdx;
+	mdata[3] = dmatches_vec[i][0].distance;
+
+	mdata[4] = dmatches_vec[i][1].queryIdx;
+	mdata[5] = dmatches_vec[i][1].trainIdx;
+	mdata[6] = 0.f;//dmatches_vec[i][1].imgIdx;
+	mdata[7] = dmatches_vec[i][1].distance;
+    }
+    
+    return dmatches_mat;
+}
+
+
 Matcher::~Matcher() {
     if (descq_d) {
 	cudaFree(descq_d);

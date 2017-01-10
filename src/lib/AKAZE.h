@@ -45,6 +45,9 @@ namespace libAKAZECU {
 	    dmatches_d(0), dmatches_h(0), pitch(0) {}
 
 	~Matcher();
+
+	// python
+	cv::Mat bfmatch_(cv::Mat desc_query, cv::Mat desc_train);
 	
 	void bfmatch(cv::Mat &desc_query, cv::Mat &desc_train,
 		     std::vector<std::vector<cv::DMatch> > &dmatches);
