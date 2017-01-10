@@ -18,7 +18,8 @@ The code has been optimized with the goal to maintain the same interface as well
 
 Major optimizations are possible, but this is work in progress. These optimizations will relax the constraint of having results that are identical to the original code.
 
-
+## Matcher
+A not very optimized matcher is also provided. It returns a std::vector<std::vector<cv::DMatch>> with the two closest matches.
 
 ## Benchmarks
 The following benchmarks are measured on the img1.pgm in the iguazu dataset provided by the original authors, and are averages over 100 runs. The computer is a 16 core Xeon running at 2.6 GHz with 32 GB of RAM and an Nvidia Titan X (Maxwell). The operating system is Ubuntu 14.04, with CUDA 8.0.
@@ -55,11 +56,10 @@ If the GPU implementation isn't an option for you, have a look at the CPU-versio
 
 
 ## Python interface
-I'm just a novice python user, so I cannot say much about the quality of this code. Anyway, I put together a python interface using boost::python, and pyboostcvconverter <https://github.com/Algomorph/pyboostcvconverter> and wrote a small test script computing akaze for two images and then matching the descriptors. The interface resides in the python-directory and has its own cmake project. It is tested on Ubuntu 14.04 with boost 1.61 and python 2.7. It assumes that akaze is installed in /usr/local. **Important:** For it to work you need to copy the libakaze_pybindings.so to /usr/local/python2.7/dist-packages. Run test.py from the build directory, i.e. cd <AKAZEROOT>/python/build; python ../test.py. Suggestions on improvements of pull requests are appreciated.
+I'm just a novice python user, so I cannot say much about the quality of this code. Anyway, I put together a python interface using boost::python, and pyboostcvconverter <https://github.com/Algomorph/pyboostcvconverter> and wrote a small test script computing akaze for two images and then matching the descriptors. The matcher returns a (\#keypoints x 8) numpy array corresponding to the two closest matches (see **Matcher** above). The interface resides in the python-directory and has its own cmake project. It is tested on Ubuntu 14.04 with boost 1.61 and python 2.7. It assumes that akaze is installed in /usr/local. **Important:** For it to work you need to copy the libakaze_pybindings.so to /usr/local/python2.7/dist-packages. Run test.py from the build directory, i.e. cd <AKAZEROOT>/python/build; python ../test.py. Suggestions on improvements of pull requests are appreciated.
 
 
 ## MATLAB interface
-
 This will presumably not work, but might only require a few modifications. If someone is interested, fork the repository and create a pull-request.
 
 
