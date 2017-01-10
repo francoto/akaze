@@ -19,7 +19,7 @@ The code has been optimized with the goal to maintain the same interface as well
 Major optimizations are possible, but this is work in progress. These optimizations will relax the constraint of having results that are identical to the original code.
 
 ## Matcher
-A not very optimized matcher is also provided. It returns a std::vector<std::vector<cv::DMatch>> with the two closest matches.
+A not very optimized matcher is also provided. It returns a std::vector\<std::vector\<cv::DMatch\>\> with the two closest matches.
 
 ## Benchmarks
 The following benchmarks are measured on the img1.pgm in the iguazu dataset provided by the original authors, and are averages over 100 runs. The computer is a 16 core Xeon running at 2.6 GHz with 32 GB of RAM and an Nvidia Titan X (Maxwell). The operating system is Ubuntu 14.04, with CUDA 8.0.
