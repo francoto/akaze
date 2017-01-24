@@ -57,7 +57,7 @@ set(AKAZE_SRCS
     lib/nldiffusion_functions.h  lib/nldiffusion_functions.cpp
     lib/utils.h                  lib/utils.cpp)
  
-add_library(AKAZE ${AKAZE_SRCS})
+add_library(AKAZE SHARED ${AKAZE_SRCS})
 target_link_libraries(AKAZE ${OpenCV_LIBS} ${Boost_PYTHON_LIBRARY} ${PYTHON_LIBRARIES})
 
 SET(AKAZE_CUDA_SRCS
