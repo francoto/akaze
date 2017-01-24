@@ -19,7 +19,8 @@ endif ()
 IF(UNIX)
   SET(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS} -g -O0  -Wall -Wextra -Wunused-variable -DDEBUG -D_DEBUG")
   SET(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS} -O0 -g  -Wall -Wextra -Wunused-variable -DDEBUG -D_DEBUG")
-  LIST(APPEND CUDA_NVCC_FLAGS "-arch=sm_50;-lineinfo;--compiler-options;-O2")
+  SET(ARCHITECTURE_CUDA -arch=sm_30) #'sm_30' or 'sm_50' according to your video card
+  LIST(APPEND CUDA_NVCC_FLAGS "${ARCHITECTURE_CUDA};-lineinfo;--compiler-options;-O2")
 ENDIF(UNIX)
 
 if(OPENMP_FOUND)
